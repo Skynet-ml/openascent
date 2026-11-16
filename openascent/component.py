@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from .result import (
     NO_OUTPUT_MESSAGE,
@@ -225,13 +226,12 @@ def _call(
         child_env = dict(os.environ if env is None else env)
         child_env["ASCENT_INPUT"] = str(input_path)
         child_env["ASCENT_OUTPUT"] = str(output_path)
-        with (
-            open(call_dir / "stdout.log", "wb") as out,
-            open(call_dir / "stderr.log", "wb") as err,
-        ):
+        # The logs have no path: the command knows the call directory and could
+        # put a link or a FIFO at a log path before the runner reads it.
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             exit_code, elapsed = _run(argv, cwd, child_env, out, err, timeout_s)
-        stdout = _tail(call_dir / "stdout.log")
-        stderr = _tail(call_dir / "stderr.log")
+            stdout = _tail(out)
+            stderr = _tail(err)
         try:
             if exit_code is None:
                 raise TimeLimitError(
@@ -382,16 +382,15 @@ def _read_output(path: Path, limit: int) -> bytes:
     return data
 
 
-def _tail(path: Path) -> str:
-    """Read the last ``LOG_TAIL_BYTES`` of a log file.
+def _tail(file: BinaryIO) -> str:
+    """Read the last ``LOG_TAIL_BYTES`` of an open log file.
 
     Args:
-        path: The log file.
+        file: The anonymous log file that the command wrote.
 
     Returns:
         The tail, decoded as UTF-8 with replacement characters.
     """
-    with open(path, "rb") as file:
-        size = file.seek(0, os.SEEK_END)
-        file.seek(max(0, size - LOG_TAIL_BYTES))
-        return file.read().decode("utf-8", errors="replace")
+    size = os.fstat(file.fileno()).st_size
+    file.seek(max(0, size - LOG_TAIL_BYTES))
+    return file.read(LOG_TAIL_BYTES).decode("utf-8", errors="replace")

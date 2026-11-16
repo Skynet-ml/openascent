@@ -24,6 +24,7 @@ from openascent import (
     parse_entry,
 )
 from openascent.cli import main
+from openascent.component import LOG_TAIL_BYTES
 
 PY = sys.executable
 CASE = {"input": "q", "expected": "Paris", "output": "Paris"}
@@ -365,3 +366,50 @@ def test_cli_usage_error(tmp_path):
     with pytest.raises(SystemExit) as caught:
         main(["score", "--entry", "x.py:f", "--input", str(tmp_path / "absent.json")])
     assert caught.value.code == 2
+
+
+def test_call_directory_holds_no_log_files(tmp_path):
+    """The folder of ASCENT_OUTPUT holds only the input file while the command runs."""
+    body = """
+        import json, os
+        folder = os.path.dirname(os.environ["ASCENT_OUTPUT"])
+        names = sorted(os.listdir(folder))
+        json.dump({"output": names}, open(os.environ["ASCENT_OUTPUT"], "w"))
+    """
+    assert call_run([PY, script(tmp_path, body)], 1, timeout_s=10).output == ["input.json"]
+
+
+def test_links_at_old_log_paths_do_not_leak(tmp_path):
+    """Links that the command puts at the old log paths do not reach the log text."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SECRET-CONTENT")
+    body = f"""
+        import os, sys
+        folder = os.path.dirname(os.environ["ASCENT_OUTPUT"])
+        for name in ("stdout.log", "stderr.log"):
+            path = os.path.join(folder, name)
+            if os.path.lexists(path):
+                os.remove(path)
+            os.symlink({str(secret)!r}, path)
+        print("out text")
+        print("err text", file=sys.stderr)
+        open(os.environ["ASCENT_OUTPUT"], "w").write('{{"output": 1}}')
+    """
+    call = call_run([PY, script(tmp_path, body)], 1, timeout_s=10)
+    assert call.stdout == "out text\n"
+    assert call.stderr == "err text\n"
+    assert "SECRET" not in call.stdout + call.stderr
+
+
+def test_log_text_is_the_bounded_end(tmp_path):
+    """More output than LOG_TAIL_BYTES gives at most LOG_TAIL_BYTES bytes: the end."""
+    body = f"""
+        import os, sys
+        sys.stdout.write("a" * {LOG_TAIL_BYTES * 3} + "THE-END")
+        sys.stderr.write("b" * {LOG_TAIL_BYTES * 3} + "ERR-END")
+        open(os.environ["ASCENT_OUTPUT"], "w").write('{{"output": 1}}')
+    """
+    call = call_run([PY, script(tmp_path, body)], 1, timeout_s=10)
+    for text, end in ((call.stdout, "THE-END"), (call.stderr, "ERR-END")):
+        assert len(text.encode()) == LOG_TAIL_BYTES
+        assert text.endswith(end)
