@@ -1,7 +1,9 @@
 """Tests of the component call with real subprocesses, and of the ``ascent`` command."""
 
 import json
+import math
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -227,11 +229,17 @@ def test_time_limit_kills_the_process_group(tmp_path):
         open({str(pid_file)!r}, "w").write(str(child.pid))
         time.sleep(30)
     """
-    start = time.monotonic()
-    with pytest.raises(TimeLimitError) as caught:
-        call_run([PY, script(tmp_path, body)], 1, timeout_s=1)
-    assert time.monotonic() - start < 10
-    assert caught.value.code == "time_limit"
+    entry = [PY, script(tmp_path, body)]
+    # A loaded machine can start the script slowly; retry with a longer limit
+    # until the script wrote the pid of its child before the kill.
+    for limit in (1, 5, 20):
+        start = time.monotonic()
+        with pytest.raises(TimeLimitError) as caught:
+            call_run(entry, 1, timeout_s=limit)
+        assert time.monotonic() - start < limit + 10
+        assert caught.value.code == "time_limit"
+        if pid_file.exists() and pid_file.read_text():
+            break
     child_pid = int(pid_file.read_text())
     for _ in range(100):
         if not _alive(child_pid):
@@ -277,12 +285,26 @@ def test_no_output_file(tmp_path):
 
 
 def test_symlink_output_is_refused(tmp_path):
-    """An output path that is a link is not a regular file."""
+    """An output path that is a link is refused with a link message."""
     target = tmp_path / "target.json"
     target.write_text('{"output": 1}')
     body = f'import os\nos.symlink({str(target)!r}, os.environ["ASCENT_OUTPUT"])\n'
-    with pytest.raises(OutputFileError, match="not a regular file"):
+    with pytest.raises(OutputFileError, match="is a symbolic link"):
         call_run([PY, script(tmp_path, body)], 1, timeout_s=10)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a mode-000 file")
+def test_unreadable_output_is_refused(tmp_path):
+    """An output file that the runner cannot open gives a cannot-open message."""
+    body = """
+        import os
+        with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+            f.write('{"output": 1}')
+        os.chmod(os.environ["ASCENT_OUTPUT"], 0)
+    """
+    with pytest.raises(OutputFileError, match="cannot open the output file") as caught:
+        call_run([PY, script(tmp_path, body)], 1, timeout_s=10)
+    assert caught.value.code == "bad_output_file"
 
 
 def test_folder_output_is_refused(tmp_path):
@@ -413,3 +435,92 @@ def test_log_text_is_the_bounded_end(tmp_path):
     for text, end in ((call.stdout, "THE-END"), (call.stderr, "ERR-END")):
         assert len(text.encode()) == LOG_TAIL_BYTES
         assert text.endswith(end)
+
+
+MOVE_CALL_DIR = """
+    import os, sys
+    out = os.environ["ASCENT_OUTPUT"]
+    with open(out, "w") as f:
+        f.write('{"output": "kept"}')
+    folder = os.path.dirname(out)
+    os.rename(folder, folder + ".moved")
+    os.symlink(folder + ".moved", folder)
+    open(%r, "w").write(folder)
+    sys.exit(%d)
+"""
+
+
+def _remove_moved(folder_file):
+    """Remove the moved call folder and the link that a test command left.
+
+    Args:
+        folder_file: The file that holds the path of the original call folder.
+    """
+    folder = folder_file.read_text()
+    os.unlink(folder)
+    shutil.rmtree(folder + ".moved")
+
+
+@pytest.mark.parametrize("exit_code", [0, 3])
+def test_moved_call_directory_keeps_the_result(tmp_path, exit_code):
+    """A command that moves its call folder and links it back cannot break the call."""
+    folder_file = tmp_path / "folder"
+    entry = [PY, script(tmp_path, MOVE_CALL_DIR % (str(folder_file), exit_code))]
+    try:
+        if exit_code == 0:
+            assert call_run(entry, 1, timeout_s=10).output == "kept"
+        else:
+            with pytest.raises(ExitCodeError):
+                call_run(entry, 1, timeout_s=10)
+    finally:
+        _remove_moved(folder_file)
+
+
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf, 0, -1, True, "5", None])
+def test_invalid_time_limit_is_refused(tmp_path, bad):
+    """A time limit that is not a finite number above 0 is refused before any start."""
+    marker = tmp_path / "started"
+    entry = ["sh", "-c", f"touch {marker}"]
+    with pytest.raises(ValueError, match="time limit"):
+        call_run(entry, 1, timeout_s=bad)
+    with pytest.raises(ValueError, match="time limit"):
+        call_metric(entry, CASE, timeout_s=bad)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "0", "-1", "soon"])
+def test_cli_invalid_time_limit(tmp_path, capsys, bad):
+    """``--timeout`` that is not a finite number above 0 is a usage error."""
+    marker = tmp_path / "started"
+    case = tmp_path / "case.json"
+    case.write_text(json.dumps(CASE))
+    with pytest.raises(SystemExit) as caught:
+        main(["score", "--entry", f"touch {marker}", "--input", str(case), "--timeout", bad])
+    assert caught.value.code == 2
+    assert "--timeout" in capsys.readouterr().err
+    assert not marker.exists()
+
+
+def test_input_must_be_strict_json(tmp_path):
+    """An input value with NaN or a lone surrogate is refused before any start."""
+    marker = tmp_path / "started"
+    entry = ["sh", "-c", f"touch {marker}"]
+    with pytest.raises(ValueError, match="finite numbers"):
+        call_run(entry, math.nan, timeout_s=10)
+    with pytest.raises(ValueError, match="lone surrogate"):
+        call_run(entry, "\ud800", timeout_s=10)
+    with pytest.raises(ValueError, match="lone surrogate"):
+        call_metric(entry, {**CASE, "output": {"\udc00": 1}}, timeout_s=10)
+    assert not marker.exists()
+
+
+def test_input_keeps_valid_unicode(tmp_path):
+    """Valid non-ASCII text, also a surrogate pair, reaches the command unchanged."""
+    body = """
+        import json, os
+        value = json.load(open(os.environ["ASCENT_INPUT"], encoding="utf-8"))["input"]
+        json.dump({"output": value}, open(os.environ["ASCENT_OUTPUT"], "w"))
+    """
+    assert call_run([PY, script(tmp_path, body)], "Paris \U0001f600 café", timeout_s=10).output == (
+        "Paris \U0001f600 café"
+    )

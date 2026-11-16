@@ -73,6 +73,8 @@ INVALID_METRIC = [
     ('{"score": 1e400}', InvalidJsonError, []),
     ('{"score": 1, "score": 2}', InvalidJsonError, []),
     ('{"score": 1, "scores": {"a": {"score": 1}, "a": {"score": 2}}}', InvalidJsonError, []),
+    ('{"score": 1, "feedback": "\\udc00"}', InvalidJsonError, []),
+    ('{"score": 1, "scores": {"\\ud800": {"score": 1}}}', InvalidJsonError, []),
     ('{"score": 1', InvalidJsonError, []),
     ("", InvalidJsonError, []),
     (
@@ -99,6 +101,7 @@ VALID_RUN = [
     ('{"output": "Paris"}', "Paris"),
     ('{"output": null}', None),
     ('{"output": {"a": [1, 2.5, true]}}', {"a": [1, 2.5, True]}),
+    ('{"output": "\\ud83d\\ude00"}', "\U0001f600"),
 ]
 
 INVALID_RUN = [
@@ -108,6 +111,8 @@ INVALID_RUN = [
     ('{"output": 1, "log": "x"}', InvalidFormError, ["log: unknown key"]),
     ('{"output": 1, "output": 2}', InvalidJsonError, []),
     ('{"output": NaN}', InvalidJsonError, []),
+    ('{"output": "\\ud800"}', InvalidJsonError, []),
+    ('{"output": ["ok", {"\\udc00": 1}]}', InvalidJsonError, []),
 ]
 
 
@@ -166,3 +171,24 @@ def test_to_dict_omits_absent_keys():
         "score": 0.5,
         "scores": {"a": {"score": 1.0}, "b": {"score": 0.0, "feedback": "No."}},
     }
+
+
+# The three codes for a large number, pinned (F5): the loader refuses a float
+# literal that overflows and an integer past Python's digit limit; the metric
+# form refuses a large integer score; a run output keeps a large integer.
+LARGE_NUMBERS = [
+    (b'{"score": 1e400}', check_metric_result, InvalidJsonError),
+    (b'{"score": 1' + b"0" * 5000 + b"}", check_metric_result, InvalidJsonError),
+    (b'{"score": 1' + b"0" * 400 + b"}", check_metric_result, InvalidFormError),
+    (b'{"output": 1' + b"0" * 400 + b"}", check_run_output, None),
+]
+
+
+@pytest.mark.parametrize(("data", "check", "error"), LARGE_NUMBERS)
+def test_large_numbers(data, check, error):
+    """Each kind of large number gives its pinned result."""
+    if error is None:
+        assert check(load_json(data)) == 10**400
+    else:
+        with pytest.raises(error):
+            check(load_json(data))

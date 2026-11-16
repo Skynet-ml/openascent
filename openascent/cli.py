@@ -6,6 +6,7 @@ metric call in the current directory and prints the checked answer as JSON.
 
 import argparse
 import json
+import math
 import shlex
 import sys
 from pathlib import Path
@@ -39,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     score.add_argument("--input", required=True, help="A JSON file with the metric input object.")
     score.add_argument(
         "--timeout",
-        type=float,
+        type=_timeout,
         default=DEFAULT_TIMEOUT_S,
         help=f"The time limit in seconds (default {DEFAULT_TIMEOUT_S:g}).",
     )
@@ -63,6 +64,29 @@ def main(argv: list[str] | None = None) -> int:
     sys.stderr.write(call.stderr)
     print(json.dumps(call.result.to_dict()))
     return 0
+
+
+def _timeout(text: str) -> float:
+    """Read the ``--timeout`` value: a finite number of seconds greater than 0.
+
+    Args:
+        text: The value of ``--timeout``.
+
+    Returns:
+        The time limit in seconds.
+
+    Raises:
+        argparse.ArgumentTypeError: The value is not a finite number greater than 0.
+    """
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = math.nan
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not valid; give a finite number of seconds greater than 0"
+        )
+    return seconds
 
 
 def _entry(text: str) -> FunctionEntry | tuple[str, ...]:

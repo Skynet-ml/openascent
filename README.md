@@ -19,7 +19,8 @@ It obeys one rule:
 3. Exit with code 0.
 
 The runner starts the command with an empty stdin.
-Each call gets a new directory and a new output path. The runner removes the directory after the call.
+Each call gets a new directory and a new output path. The runner tries to remove the directory after the call.
+A command that moves or links its directory away can leave files behind.
 What the command prints on stdout and stderr is log text. It is never part of the result, so a debug print cannot change the result.
 
 ## The two kinds of call
@@ -80,12 +81,12 @@ Each error type has a stable `code`:
 | Code | Cause |
 | --- | --- |
 | `start_failed` | The command cannot start: it is not found or not executable. |
-| `time_limit` | The command ran longer than the time limit. The runner kills its whole process group. |
+| `time_limit` | The command ran longer than the time limit. The runner kills its whole process group. A process that leaves the group (for example with `setsid`) is not stopped; that needs an OS sandbox. |
 | `nonzero_exit` | The command exited with a code that is not 0. The error keeps the code and the tail of stderr. |
 | `no_output` | The command wrote no output file. |
-| `bad_output_file` | The output path is not a regular file (for example a link), or the file is larger than the size limit (1 MiB by default). |
-| `invalid_json` | The output file is not strict JSON: not UTF-8, a `NaN` or `Infinity` token, or a duplicate key. |
-| `invalid_form` | The output file is valid JSON but not the valid form, for example a metric result with no `score`. |
+| `bad_output_file` | The output path is a link or not a regular file, the runner cannot open the file, or the file is larger than the size limit (1 MiB by default). |
+| `invalid_json` | The output file is not strict JSON: not UTF-8, a `NaN` or `Infinity` token, a float literal that overflows (`1e400`), an integer longer than 4300 digits, a duplicate key, or a lone surrogate escape such as `"\ud800"`. |
+| `invalid_form` | The output file is valid JSON but not the valid form, for example a metric result with no `score`, or a `score` that is an integer too large for a float. A large integer in a run output is valid. |
 
 ## The two entry forms
 

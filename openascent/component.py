@@ -8,7 +8,9 @@ files into one folder in a sandbox and import that folder as a package,
 without an install.
 """
 
+import errno
 import json
+import math
 import os
 import signal
 import stat
@@ -128,6 +130,8 @@ def call_run(
         The output value, the bounded log text and the elapsed time.
 
     Raises:
+        ValueError: The time limit is not a finite number greater than 0, or the
+            input value is not strict JSON.
         AscentError: A subclass names the cause of the failure.
     """
     output, stdout, stderr, elapsed = _call(
@@ -168,7 +172,8 @@ def call_metric(
         The checked metric result, the bounded log text and the elapsed time.
 
     Raises:
-        ValueError: The payload has no ``input`` or no ``output`` key.
+        ValueError: The time limit is not a finite number greater than 0, or the
+            payload has no ``input`` or no ``output`` key, or is not strict JSON.
         AscentError: A subclass names the cause of the failure.
     """
     if not isinstance(payload, dict) or "input" not in payload or "output" not in payload:
@@ -215,14 +220,19 @@ def _call(
         The checked value, the stdout tail, the stderr tail and the elapsed time.
 
     Raises:
+        ValueError: The time limit or the input object is not valid.
         AscentError: A subclass names the cause of the failure.
     """
+    _check_timeout(timeout_s)
+    data = _input_bytes(payload)
     argv = _argv(parse_entry(entry), kind, cwd)
-    with tempfile.TemporaryDirectory(prefix="ascent-") as tmp:
+    # A command can move or link its call directory away; a failed cleanup
+    # must not lose a valid result.
+    with tempfile.TemporaryDirectory(prefix="ascent-", ignore_cleanup_errors=True) as tmp:
         call_dir = Path(tmp)
         input_path = call_dir / "input.json"
         output_path = call_dir / "output.json"
-        input_path.write_text(json.dumps(payload, allow_nan=False), encoding="utf-8")
+        input_path.write_bytes(data)
         child_env = dict(os.environ if env is None else env)
         child_env["ASCENT_INPUT"] = str(input_path)
         child_env["ASCENT_OUTPUT"] = str(output_path)
@@ -246,6 +256,56 @@ def _call(
             error.stderr = stderr
             raise
     return value, stdout, stderr, elapsed
+
+
+def _check_timeout(timeout_s: object) -> None:
+    """Refuse a time limit that is not a finite number greater than 0.
+
+    Args:
+        timeout_s: The time limit in seconds.
+
+    Raises:
+        ValueError: The time limit is not valid. NaN and infinity would turn
+            the limit off.
+    """
+    if (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, int | float)
+        or not math.isfinite(timeout_s)
+        or timeout_s <= 0
+    ):
+        raise ValueError(
+            f"The time limit {timeout_s!r} is not valid. Give a finite number of "
+            "seconds greater than 0."
+        )
+
+
+def _input_bytes(payload: dict) -> bytes:
+    """Encode the input object as strict UTF-8 JSON.
+
+    Args:
+        payload: The input object.
+
+    Returns:
+        The content of the input file.
+
+    Raises:
+        ValueError: The object holds NaN or infinity, or a string with a lone
+            surrogate.
+    """
+    try:
+        text = json.dumps(payload, allow_nan=False, ensure_ascii=False)
+    except ValueError as error:
+        raise ValueError(
+            f"The input value is not strict JSON ({error}). Use finite numbers only."
+        ) from None
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(
+            "The input value holds a string with a lone surrogate, which is not "
+            "valid Unicode text. Use only valid Unicode strings."
+        ) from None
 
 
 def _argv(entry: Entry, kind: str, cwd: str | os.PathLike | None) -> list[str]:
@@ -310,8 +370,9 @@ def _run(argv, cwd, env, out, err, timeout_s: float) -> tuple[int | None, float]
     except subprocess.TimeoutExpired:
         exit_code = None
     finally:
-        # Also stop the processes that the command left running after a
-        # normal exit, so none of them outlives the call.
+        # Also stop every process still in the command's process group after a
+        # normal exit. A process that leaves the group (setsid) survives; to
+        # stop it needs an OS sandbox, which is out of scope.
         _kill_group(process.pid)
         process.wait()
     return exit_code, time.monotonic() - start
@@ -357,22 +418,30 @@ def _read_output(path: Path, limit: int) -> bytes:
 
     Raises:
         NoOutputError: The file does not exist.
-        OutputFileError: The path is not a regular file, or the file is too large.
+        OutputFileError: The path is a link or not a regular file, the runner
+            cannot open it, or the file is too large.
     """
-    not_regular = (
-        "The output path is not a regular file. Write a plain file, "
-        "not a link or a folder, at the path in ASCENT_OUTPUT."
-    )
     try:
         # O_NONBLOCK: a FIFO at the path must not block the open.
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         raise NoOutputError(NO_OUTPUT_MESSAGE) from None
-    except OSError:
-        raise OutputFileError(not_regular) from None
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise OutputFileError(
+                "The output path is a symbolic link. Write a plain file, "
+                "not a link, at the path in ASCENT_OUTPUT."
+            ) from None
+        raise OutputFileError(
+            f"The runner cannot open the output file ({error.strerror}). Write a "
+            "plain file that the runner can read, at the path in ASCENT_OUTPUT."
+        ) from None
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
-        raise OutputFileError(not_regular)
+        raise OutputFileError(
+            "The output path is not a regular file. Write a plain file, "
+            "not a folder or a FIFO, at the path in ASCENT_OUTPUT."
+        )
     with open(fd, "rb") as file:
         data = file.read(limit + 1)
     if len(data) > limit:

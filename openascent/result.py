@@ -85,7 +85,7 @@ class NoOutputError(AscentError):
 
 
 class OutputFileError(AscentError):
-    """The output path is not a regular file, or the file is too large."""
+    """The output path is a link or not a regular file, cannot be opened, or is too large."""
 
     code = "bad_output_file"
 
@@ -174,8 +174,12 @@ def load_json(data: bytes) -> object:
         The parsed JSON value.
 
     Raises:
-        InvalidJsonError: The bytes are not UTF-8, not JSON, or hold a NaN or
-            Infinity token, a number too large for a float, or a duplicate key.
+        InvalidJsonError: The bytes are not UTF-8 or not JSON. Also: a NaN or
+            Infinity token, a float literal that overflows (``1e400``), an
+            integer longer than Python's 4300-digit limit, a duplicate key, or
+            a string or key with a lone surrogate escape (``"\\ud800"``).
+            A large integer within the digit limit parses; the form check
+            decides if it fits.
     """
     try:
         text = data.decode("utf-8")
@@ -185,7 +189,7 @@ def load_json(data: bytes) -> object:
             "Write the result as UTF-8 JSON."
         ) from None
     try:
-        return json.loads(
+        value = json.loads(
             text,
             object_pairs_hook=_unique_keys,
             parse_constant=_reject_constant,
@@ -196,6 +200,40 @@ def load_json(data: bytes) -> object:
             f"The output file is not valid JSON: {error}. Write one strict JSON "
             "value: UTF-8, no NaN or Infinity, no duplicate keys."
         ) from None
+    if _has_lone_surrogate(value):
+        raise InvalidJsonError(
+            "The output file holds a string with a lone surrogate escape, for "
+            'example "\\ud800". Write only valid Unicode text.'
+        )
+    return value
+
+
+def _has_lone_surrogate(value: object) -> bool:
+    """Tell if a parsed JSON value holds a string or key with a lone surrogate.
+
+    A walk with a list, not recursion, so a deep value cannot overflow the stack.
+
+    Args:
+        value: The parsed JSON value.
+
+    Returns:
+        True when a string cannot be encoded as UTF-8.
+    """
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            if not item.isascii():
+                try:
+                    item.encode("utf-8")
+                except UnicodeEncodeError:
+                    return True
+        elif isinstance(item, dict):
+            pending.extend(item)
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return False
 
 
 def _unique_keys(pairs: list[tuple[str, object]]) -> dict:
