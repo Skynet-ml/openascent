@@ -335,29 +335,43 @@ def _readme_section():
     """Return the text of the run record section of the README.
 
     Returns:
-        The text from the section heading to the end of the file.
+        The text from the section heading to the next heading of the same level.
     """
-    return README.read_text(encoding="utf-8").split("\n## The run record\n", 1)[1]
+    text = README.read_text(encoding="utf-8")
+    return text.split("\n## The run record\n", 1)[1].split("\n## ", 1)[0]
 
 
-def _run_readme_command(marker, cwd):
-    """Run one ``python3 -c`` command of the run record section as the README gives it.
+def _readme_command(marker):
+    """Find one ``python3 -c`` command of the run record section.
 
     Args:
         marker: A text that only the wanted command holds.
+
+    Returns:
+        The command line as the README gives it.
+    """
+    lines = [line.strip() for line in _readme_section().splitlines()]
+    (command,) = [line for line in lines if line.startswith("python3 -c ") and marker in line]
+    return command
+
+
+def _run_command(command, cwd, env=None):
+    """Run one command line of the README in a shell.
+
+    Args:
+        command: The command line.
         cwd: The directory to run the command in.
+        env: Environment variables to set for the command, or ``None``.
 
     Returns:
         The output of the command, with no space at the ends.
     """
-    lines = [line.strip() for line in _readme_section().splitlines()]
-    (command,) = [line for line in lines if line.startswith("python3 -c ") and marker in line]
     # The command names python3: put the interpreter of the tests first on the path.
     path = f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"
     done = subprocess.run(
         ["sh", "-c", command],
         cwd=cwd,
-        env={**os.environ, "PATH": path},
+        env={**os.environ, "PATH": path, **(env or {})},
         capture_output=True,
         text=True,
         check=True,
@@ -386,12 +400,29 @@ def test_readme_metric_command(tmp_path):
     for path, data in METRIC_FILES.items():
         (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / path).write_bytes(data)
-    assert _run_readme_command("sys.argv", tmp_path) == _sha256(_metric_parts(METRIC_FILES))
+    command = _readme_command("sys.argv")
+    assert _run_command(command, tmp_path) == _sha256(_metric_parts(METRIC_FILES))
 
 
-def test_readme_request_cases_command(tmp_path):
-    """The request cases command in the README gives the hash of the compact sorted-key JSON."""
+def test_readme_metric_command_with_ascii_locale(tmp_path):
+    """The metric hash command takes a path that is not ASCII when the locale is ASCII."""
+    files = {"metric.py": b"A = 1\n", "lib/é.py": b"X = 1\n"}
+    for path, data in files.items():
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_bytes(data)
+    command = _readme_command("sys.argv")
+    assert command.endswith(" metric.py lib/util.py")
+    command = command.removesuffix("lib/util.py") + "lib/é.py"
+    # On Linux these three variables make Python decode the arguments as ASCII.
+    env = {"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
+    assert _run_command(command, tmp_path, env) == _sha256(_metric_parts(files))
+
+
+@pytest.mark.parametrize("env", [{}, {"PYTHONIOENCODING": "latin-1"}], ids=["default", "latin-1"])
+def test_readme_request_cases_command(tmp_path, env):
+    """The request cases command in the README reads the cases file as UTF-8 in each environment."""
     cases_file = tmp_path / "cases.json"
     cases_file.write_text(json.dumps(REQUEST_CASES, ensure_ascii=False, indent=2), encoding="utf-8")
     text = '[{"expected":"CAFÉ","input":"café"},{"expected":2,"input":"b"}]'
-    assert _run_readme_command("sys.stdin", tmp_path) == _sha256(text.encode("utf-8"))
+    command = _readme_command("sys.stdin")
+    assert _run_command(command, tmp_path, env) == _sha256(text.encode("utf-8"))

@@ -332,7 +332,7 @@ Its path is the path where the runner puts the file to run the metric, relative 
 Run this in the repository root. Give the path of each metric file in the form above, for example `lib/util.py`, not `./lib/util.py`.
 
 ```sh
-python3 -c 'import hashlib,sys; h=lambda b: hashlib.sha256(b).hexdigest(); print(h(b"".join(p+b"\0"+str(len(d)).encode()+b"\0"+h(d).encode() for p in sorted(a.encode() for a in sys.argv[1:]) for d in [open(p,"rb").read()])))' metric.py lib/util.py
+python3 -c 'import hashlib,os,sys; h=lambda b: hashlib.sha256(b).hexdigest(); print(h(b"".join(p+b"\0"+str(len(d)).encode()+b"\0"+h(d).encode() for p in sorted(os.fsencode(a) for a in sys.argv[1:]) for d in [open(p,"rb").read()])))' metric.py lib/util.py
 ```
 
 `cases_sha256` depends on `cases_source`:
@@ -349,7 +349,7 @@ python3 -c 'import hashlib,sys; h=lambda b: hashlib.sha256(b).hexdigest(); print
   For the cases in `cases.json`:
 
   ```sh
-  python3 -c 'import hashlib,json,sys; print(hashlib.sha256(json.dumps(json.load(sys.stdin), sort_keys=True, separators=(",",":"), ensure_ascii=False).encode("utf-8")).hexdigest())' < cases.json
+  python3 -c 'import hashlib,json,sys; print(hashlib.sha256(json.dumps(json.load(sys.stdin.buffer), sort_keys=True, separators=(",",":"), ensure_ascii=False).encode("utf-8")).hexdigest())' < cases.json
   ```
 
 - `null`: the run has no cases.
