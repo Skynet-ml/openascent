@@ -45,7 +45,11 @@ _READ_CHUNK_BYTES = 64 * 1024
 
 @dataclass(frozen=True)
 class FunctionEntry:
-    """A Python function entry: ``path/file.py:function``."""
+    """A Python function entry: ``path/file.py:function``.
+
+    ``parse_entry`` checks both fields as it checks the string form. A
+    ``pathlib.Path`` in ``path`` is refused: the field is a ``str``.
+    """
 
     path: str
     function: str
@@ -89,10 +93,11 @@ def parse_entry(value: object) -> Entry:
         ValueError: The value is neither form.
     """
     if isinstance(value, FunctionEntry):
-        return value
-    if isinstance(value, str):
+        if _is_function(value.path, value.function):
+            return value
+    elif isinstance(value, str):
         path, sep, function = value.rpartition(":")
-        if sep and path.endswith(".py") and len(path) > 3 and function.isidentifier():
+        if sep and _is_function(path, function):
             return FunctionEntry(path, function)
     elif (
         isinstance(value, list | tuple)
@@ -104,6 +109,25 @@ def parse_entry(value: object) -> Entry:
     raise ValueError(
         f"The entry {value!r} is not valid. Use a command as a list of strings, "
         'for example ["./metric.sh"], or a Python function as "path/file.py:function".'
+    )
+
+
+def _is_function(path: object, function: object) -> bool:
+    """Tell if a path and a name form a valid Python function entry.
+
+    Args:
+        path: The path of the ``.py`` file.
+        function: The function name.
+
+    Returns:
+        True when the path is a ``.py`` file name and the name is an identifier.
+    """
+    return (
+        isinstance(path, str)
+        and path.endswith(".py")
+        and len(path) > 3
+        and isinstance(function, str)
+        and function.isidentifier()
     )
 
 

@@ -93,6 +93,9 @@ def _timeout(text: str) -> float:
 def _entry(text: str) -> FunctionEntry | tuple[str, ...]:
     """Read the ``--entry`` string as a function entry or as a command.
 
+    The string is split like a shell line in both forms, so a path with a
+    space needs inner quotes.
+
     Args:
         text: The value of ``--entry``.
 

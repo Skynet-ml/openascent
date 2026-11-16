@@ -109,6 +109,7 @@ On a failure it prints the error code and message on stderr and exits with code 
 The default time limit is 60 seconds. The command needs no account and no network.
 
 `--entry` is `path/file.py:function`, or a command line that the command splits like a shell does.
+The command splits the value like a shell line in both forms. Put a path that has a space in inner quotes, for example `--entry "'my dir/m.py:score'"`.
 
 Try the shell example. It needs [jq](https://jqlang.org):
 

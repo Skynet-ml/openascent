@@ -8,6 +8,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from pathlib import Path
 
 import pytest
 
@@ -435,6 +436,18 @@ def test_cli_command_entry_and_failure(tmp_path):
     assert "ascent: no_output: The command wrote no output file." in failed.stderr
 
 
+def test_cli_function_entry_in_a_folder_with_a_space(tmp_path, capsys, monkeypatch):
+    """A function path with a space works in ``--entry`` with inner quotes."""
+    folder = tmp_path / "my dir"
+    folder.mkdir()
+    script(folder, "def score(output):\n    return {'score': 1}\n", name="m.py")
+    case = tmp_path / "case.json"
+    case.write_text(json.dumps(CASE))
+    monkeypatch.chdir(tmp_path)
+    assert main(["score", "--entry", "'my dir/m.py:score'", "--input", str(case)]) == 0
+    assert json.loads(capsys.readouterr().out) == {"score": 1.0}
+
+
 def test_cli_usage_error(tmp_path):
     """A usage error exits with 2."""
     with pytest.raises(SystemExit) as caught:
@@ -757,6 +770,68 @@ def test_elapsed_number_is_accepted(tmp_path, elapsed):
     assert call_metric("component.py:score", payload, timeout_s=10, cwd=tmp_path).result.score == (
         elapsed
     )
+
+
+def test_kwargs_function_missing_required_parameter(tmp_path):
+    """A function with **kwargs still needs each required named parameter."""
+    script(tmp_path, "def kw(output, expected, **kw):\n    return {'score': 1}\n")
+    payload = {"input": 1, "output": 2}
+    with pytest.raises(ExitCodeError) as caught:
+        call_metric("component.py:kw", payload, timeout_s=10, cwd=tmp_path)
+    assert caught.value.code == "nonzero_exit"
+    assert caught.value.exit_code == 2
+    assert "required parameter 'expected'" in caught.value.stderr
+    assert "Traceback" not in caught.value.stderr
+
+
+def test_kwargs_function_gets_the_extra_keys(tmp_path):
+    """A function with every required name and **kwargs gets the other keys in kwargs."""
+    body = "def kw(output, **kw):\n    return {'score': output, 'feedback': ','.join(sorted(kw))}\n"
+    script(tmp_path, body)
+    payload = {"input": 1, "output": 2, "elapsed_s": 0.5}
+    result = call_metric("component.py:kw", payload, timeout_s=10, cwd=tmp_path).result
+    assert (result.score, result.feedback) == (2.0, "elapsed_s,input")
+
+
+def test_positional_only_default_with_kwargs(tmp_path):
+    """A positional-only parameter keeps its default; the key of its name goes to kwargs."""
+    body = "def po(x=5, /, **kw):\n    return {'score': x, 'feedback': str(kw['x'])}\n"
+    script(tmp_path, body)
+    payload = {"input": 1, "output": 2, "x": 7}
+    result = call_metric("component.py:po", payload, timeout_s=10, cwd=tmp_path).result
+    assert (result.score, result.feedback) == (5.0, "7")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param(FunctionEntry(123, "f"), id="int-path"),
+        pytest.param(FunctionEntry("/abs/m.py", "not ok"), id="bad-name"),
+        pytest.param(FunctionEntry("/abs/m.py", ""), id="empty-name"),
+        pytest.param(FunctionEntry("/abs/case.json", "f"), id="not-py"),
+        pytest.param(FunctionEntry(".py", "f"), id="only-suffix"),
+        pytest.param(FunctionEntry(Path("/abs/m.py"), "f"), id="path-object"),
+    ],
+)
+def test_bad_function_entry_is_refused(tmp_path, monkeypatch, entry):
+    """A caller-built FunctionEntry gets the same checks as the string form, before any start."""
+    started = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
+    with pytest.raises(ValueError, match="is not valid"):
+        parse_entry(entry)
+    with pytest.raises(ValueError, match="is not valid"):
+        call_run(entry, 1, timeout_s=10)
+    with pytest.raises(ValueError, match="is not valid"):
+        call_metric(entry, CASE, timeout_s=10)
+    assert started == []
+
+
+def test_good_function_entry_works(tmp_path):
+    """A valid caller-built FunctionEntry runs."""
+    script(tmp_path, "def go(value):\n    return value + 1\n")
+    entry = FunctionEntry(str(tmp_path / "component.py"), "go")
+    assert parse_entry(entry) is entry
+    assert call_run(entry, 1, timeout_s=10).output == 2
 
 
 @pytest.mark.parametrize("signature", ["output, /", "output, /, **kw"])

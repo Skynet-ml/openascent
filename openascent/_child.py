@@ -111,13 +111,11 @@ def _arguments(function, payload: dict) -> dict | None:
                 file=sys.stderr,
             )
             return None
-    if any(p.kind is p.VAR_KEYWORD for p in parameters):
-        return dict(payload)
     arguments = {}
     for p in parameters:
         if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY) and p.name in payload:
             arguments[p.name] = payload[p.name]
-        elif p.default is p.empty and p.kind is not p.VAR_POSITIONAL:
+        elif p.default is p.empty and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
             print(
                 f"The metric function cannot get its required parameter {p.name!r} "
                 "from the input object. Name each parameter after a key of the "
@@ -126,6 +124,11 @@ def _arguments(function, payload: dict) -> dict | None:
                 file=sys.stderr,
             )
             return None
+    if any(p.kind is p.VAR_KEYWORD for p in parameters):
+        # Merge by "not yet given", not by "not a parameter name": a key that
+        # matches a positional-only name must still reach **kwargs.
+        for key, value in payload.items():
+            arguments.setdefault(key, value)
     return arguments
 
 
