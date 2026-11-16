@@ -156,7 +156,7 @@ def llm(prompt: str, input: object = None, images: list | None = None) -> str:
     return result
 
 
-def log(event: str, **fields: object) -> None:
+def log(event: str, /, **fields: object) -> None:
     """Send one log event to the runner.
 
     The call has no time limit of its own. The time limit of the metric call
@@ -164,7 +164,8 @@ def log(event: str, **fields: object) -> None:
 
     Args:
         event: The name of the event.
-        **fields: The fields of the event. Each value is strict JSON.
+        **fields: The fields of the event. Each value is strict JSON. A field
+            can have any name, also ``event``.
 
     Raises:
         ValueError: The event name is not a non-empty string, or the fields

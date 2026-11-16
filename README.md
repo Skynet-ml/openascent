@@ -228,7 +228,7 @@ def score(input, output):
 
 - `call(stage, input=None)` returns the output of the stage. It raises `StageError` on a failure.
 - `llm(prompt, input=None, images=None)` returns the text of the answer. With `input`, `prompt` is the system message and `input` is the user message. An `input` that is not a string goes as its JSON text. Each image is a URL string (`http://`, `https://` or `data:`), a `pathlib.Path` of an image file, or the bytes of a PNG, JPEG, GIF or WebP image.
-- `log(event, **fields)` sends one event.
+- `log(event, /, **fields)` sends one event. A field can have any name, also `event`.
 - `llm` and `log` raise `HelperError` on a failure. `StageError` is a kind of `HelperError`. A bad argument raises `ValueError` before any request.
 - The helpers do not use the proxy settings of the environment, do not follow a redirect, and read at most 16 MiB of an answer.
 

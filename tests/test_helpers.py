@@ -477,6 +477,17 @@ def test_log_no_fields(server, monkeypatch):
     assert json.loads(server.requests[0]["body"]) == {"event": "start", "fields": {}}
 
 
+def test_log_field_named_event(server, monkeypatch):
+    """A field can have the name event: the event name is positional only."""
+    monkeypatch.setenv("ASCENT_LOG_URL", server.url)
+    server.reply = (204, b"")
+    log("case_done", event="x", fields=1)
+    assert json.loads(server.requests[0]["body"]) == {
+        "event": "case_done",
+        "fields": {"event": "x", "fields": 1},
+    }
+
+
 @pytest.mark.parametrize("value", [None, ""])
 def test_log_absent(monkeypatch, value):
     """An absent or empty log variable is a helper error."""
