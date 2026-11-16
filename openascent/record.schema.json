@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Skynet-ml/openascent/blob/main/openascent/record.schema.json",
+  "title": "OpenAscent run record, version 1",
+  "description": "The record that a runner returns with the run result. A reader uses it to check a score by hand.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_version",
+    "contract_sha256",
+    "metric_sha256",
+    "metric_source",
+    "cases_sha256",
+    "cases_source",
+    "base_commit",
+    "change_sha256",
+    "baseline_score",
+    "final_score",
+    "seed",
+    "split",
+    "image",
+    "contract_met"
+  ],
+  "properties": {
+    "record_version": {
+      "description": "The version of the record format.",
+      "const": 1
+    },
+    "contract_sha256": {
+      "description": "SHA-256 of the bytes of the contract file ascent.toml.",
+      "$ref": "#/$defs/sha256"
+    },
+    "metric_sha256": {
+      "description": "SHA-256 of the framed parts of the metric files, in sorted path order.",
+      "$ref": "#/$defs/sha256"
+    },
+    "metric_source": {
+      "description": "Where the metric files come from: the repository at base_commit, or the run request.",
+      "enum": ["repository", "request"]
+    },
+    "cases_sha256": {
+      "description": "SHA-256 of the cases file bytes, or of the compact sorted-key JSON of the request cases. Null when the run has no cases.",
+      "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    },
+    "cases_source": {
+      "description": "Where the cases come from: a file, the run request, or null when the run has no cases.",
+      "enum": ["file", "request", null]
+    },
+    "base_commit": {
+      "description": "The full commit SHA of the repository before the change.",
+      "anyOf": [{"$ref": "#/$defs/sha1"}, {"$ref": "#/$defs/sha256"}]
+    },
+    "change_sha256": {
+      "description": "SHA-256 of the patch text as UTF-8 bytes. Null when the patch is empty: the hash of zero bytes is not valid here.",
+      "anyOf": [
+        {
+          "allOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"not": {"const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}
+          ]
+        },
+        {"type": "null"}
+      ]
+    },
+    "baseline_score": {
+      "description": "The score of the program before the change.",
+      "type": ["number", "null"]
+    },
+    "final_score": {
+      "description": "The score of the program after the change.",
+      "type": ["number", "null"]
+    },
+    "seed": {
+      "description": "The seed of the run.",
+      "type": ["integer", "null"]
+    },
+    "split": {
+      "description": "How the run split the cases, or null.",
+      "anyOf": [{"$ref": "#/$defs/split"}, {"type": "null"}]
+    },
+    "image": {
+      "description": "The container image that the run used.",
+      "type": ["string", "null"]
+    },
+    "contract_met": {
+      "description": "True when the result meets the contract.",
+      "type": "boolean"
+    },
+    "target_reached": {
+      "description": "True when the final score reaches the contract target. Present only when the contract has a target.",
+      "type": "boolean"
+    },
+    "requirements_passed": {
+      "description": "True exactly when failed_requirements is empty. Present together with failed_requirements, only when the contract has requirements.",
+      "type": "boolean"
+    },
+    "failed_requirements": {
+      "description": "The requirements that failed. Present together with requirements_passed, only when the contract has requirements.",
+      "type": "array",
+      "items": {"$ref": "#/$defs/failed_requirement"}
+    }
+  },
+  "anyOf": [
+    {
+      "properties": {
+        "cases_sha256": {"type": "null"},
+        "cases_source": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
+        "cases_sha256": {"type": "string"},
+        "cases_source": {"type": "string"}
+      }
+    }
+  ],
+  "dependentRequired": {
+    "requirements_passed": ["failed_requirements"],
+    "failed_requirements": ["requirements_passed"]
+  },
+  "allOf": [
+    {
+      "$comment": "No required list in the if: dependentRequired already makes both keys present or both absent.",
+      "if": {"properties": {"requirements_passed": {"const": true}}},
+      "then": {"properties": {"failed_requirements": {"maxItems": 0}}}
+    },
+    {
+      "if": {"properties": {"requirements_passed": {"const": false}}},
+      "then": {"properties": {"failed_requirements": {"minItems": 1}}}
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "description": "64 lowercase hex characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "sha1": {
+      "description": "40 lowercase hex characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "minLength": 40,
+      "maxLength": 40
+    },
+    "positions": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 0}
+    },
+    "split": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule", "seed", "search", "validation", "held_out"],
+      "properties": {
+        "rule": {
+          "description": "The name of the split rule, for example pairs or single.",
+          "type": "string",
+          "minLength": 1
+        },
+        "seed": {
+          "description": "The seed of the split.",
+          "type": ["integer", "null"]
+        },
+        "search": {
+          "description": "The positions of the search cases.",
+          "$ref": "#/$defs/positions"
+        },
+        "validation": {
+          "description": "The positions of the validation cases.",
+          "$ref": "#/$defs/positions"
+        },
+        "held_out": {
+          "description": "The positions of the held-out cases.",
+          "$ref": "#/$defs/positions"
+        }
+      }
+    },
+    "failed_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "direction", "limit", "value", "reason"],
+      "properties": {
+        "name": {
+          "description": "The name of the requirement.",
+          "type": "string"
+        },
+        "direction": {
+          "description": "Which way is better for the requirement.",
+          "enum": ["maximize", "minimize"]
+        },
+        "limit": {
+          "description": "The limit of the requirement.",
+          "type": "number"
+        },
+        "value": {
+          "description": "The measured value, or null when the runner has no value.",
+          "type": ["number", "null"]
+        },
+        "reason": {
+          "description": "Why the requirement failed.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}
