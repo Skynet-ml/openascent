@@ -131,7 +131,7 @@ def call_run(
 
     Raises:
         ValueError: The time limit is not a finite number greater than 0, or the
-            input value is not strict JSON.
+            input value is not strict JSON (see ``_input_bytes``).
         AscentError: A subclass names the cause of the failure.
     """
     output, stdout, stderr, elapsed = _call(
@@ -173,7 +173,8 @@ def call_metric(
 
     Raises:
         ValueError: The time limit is not a finite number greater than 0, or the
-            payload has no ``input`` or no ``output`` key, or is not strict JSON.
+            payload has no ``input`` or no ``output`` key, or is not strict JSON
+            (see ``_input_bytes``).
         AscentError: A subclass names the cause of the failure.
     """
     if not isinstance(payload, dict) or "input" not in payload or "output" not in payload:
@@ -236,25 +237,32 @@ def _call(
         child_env = dict(os.environ if env is None else env)
         child_env["ASCENT_INPUT"] = str(input_path)
         child_env["ASCENT_OUTPUT"] = str(output_path)
-        # The logs have no path: the command knows the call directory and could
-        # put a link or a FIFO at a log path before the runner reads it.
-        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-            exit_code, elapsed = _run(argv, cwd, child_env, out, err, timeout_s)
-            stdout = _tail(out)
-            stderr = _tail(err)
+        # The runner reads the output through this descriptor, not the path:
+        # a command can rename the call directory and put a link or another
+        # directory at its path, but the descriptor keeps the real one.
+        dir_fd = os.open(call_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            if exit_code is None:
-                raise TimeLimitError(
-                    f"The command ran longer than the time limit of {timeout_s} s. "
-                    "The runner stopped it and its process group. Make the command "
-                    "faster, or give it a longer time limit."
-                )
-            if exit_code != 0:
-                raise ExitCodeError(_exit_message(exit_code), exit_code=exit_code)
-            value = check(load_json(_read_output(output_path, max_output_bytes)))
-        except AscentError as error:
-            error.stderr = stderr
-            raise
+            # The logs have no path: the command knows the call directory and
+            # could put a link or a FIFO at a log path before the runner reads it.
+            with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+                exit_code, elapsed = _run(argv, cwd, child_env, out, err, timeout_s)
+                stdout = _tail(out)
+                stderr = _tail(err)
+            try:
+                if exit_code is None:
+                    raise TimeLimitError(
+                        f"The command ran longer than the time limit of {timeout_s} s. "
+                        "The runner stopped it and its process group. Make the command "
+                        "faster, or give it a longer time limit."
+                    )
+                if exit_code != 0:
+                    raise ExitCodeError(_exit_message(exit_code), exit_code=exit_code)
+                value = check(load_json(_read_output(dir_fd, max_output_bytes)))
+            except AscentError as error:
+                error.stderr = stderr
+                raise
+        finally:
+            os.close(dir_fd)
     return value, stdout, stderr, elapsed
 
 
@@ -268,15 +276,16 @@ def _check_timeout(timeout_s: object) -> None:
         ValueError: The time limit is not valid. NaN and infinity would turn
             the limit off.
     """
-    if (
-        isinstance(timeout_s, bool)
-        or not isinstance(timeout_s, int | float)
-        or not math.isfinite(timeout_s)
-        or timeout_s <= 0
-    ):
+    valid = isinstance(timeout_s, int | float) and not isinstance(timeout_s, bool)
+    if valid:
+        try:
+            valid = math.isfinite(float(timeout_s)) and timeout_s > 0
+        except OverflowError:
+            valid = False
+    if not valid:
+        # No value in the message: repr() of a huge integer can itself fail.
         raise ValueError(
-            f"The time limit {timeout_s!r} is not valid. Give a finite number of "
-            "seconds greater than 0."
+            "The time limit is not valid. Give a finite number of seconds greater than 0."
         )
 
 
@@ -290,15 +299,31 @@ def _input_bytes(payload: dict) -> bytes:
         The content of the input file.
 
     Raises:
-        ValueError: The object holds NaN or infinity, or a string with a lone
-            surrogate.
+        ValueError: The object holds a value that JSON cannot hold (NaN,
+            infinity, a set, any other object), an object key that is not a
+            string, or a string with a lone surrogate.
     """
     try:
         text = json.dumps(payload, allow_nan=False, ensure_ascii=False)
-    except ValueError as error:
+    except (ValueError, TypeError, RecursionError) as error:
         raise ValueError(
-            f"The input value is not strict JSON ({error}). Use finite numbers only."
+            f"The input value is not strict JSON ({error}). Use only finite numbers, "
+            "strings, booleans, None, lists, and dicts with string keys."
         ) from None
+    # json.dumps turns a key such as 1 into "1" in silence, and {1: "a", "1": "b"}
+    # into a duplicate key. dumps passed, so the value has no cycle to walk into.
+    pending = [payload]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            if not all(isinstance(key, str) for key in item):
+                raise ValueError(
+                    "The input value holds an object key that is not a string. "
+                    "Use only string keys in dicts."
+                )
+            pending.extend(item.values())
+        elif isinstance(item, list | tuple):
+            pending.extend(item)
     try:
         return text.encode("utf-8")
     except UnicodeEncodeError:
@@ -406,11 +431,11 @@ def _exit_message(exit_code: int) -> str:
     return f"{cause} Make it exit 0 after it writes the output file. See its stderr."
 
 
-def _read_output(path: Path, limit: int) -> bytes:
+def _read_output(dir_fd: int, limit: int) -> bytes:
     """Read the output file without following a link, up to the size limit.
 
     Args:
-        path: The output path.
+        dir_fd: The open descriptor of the real call directory.
         limit: The largest size in bytes.
 
     Returns:
@@ -418,12 +443,12 @@ def _read_output(path: Path, limit: int) -> bytes:
 
     Raises:
         NoOutputError: The file does not exist.
-        OutputFileError: The path is a link or not a regular file, the runner
-            cannot open it, or the file is too large.
+        OutputFileError: The path is a link, a hard link or not a regular file,
+            the runner cannot open it, or the file is too large.
     """
     try:
         # O_NONBLOCK: a FIFO at the path must not block the open.
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open("output.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except FileNotFoundError:
         raise NoOutputError(NO_OUTPUT_MESSAGE) from None
     except OSError as error:
@@ -436,11 +461,20 @@ def _read_output(path: Path, limit: int) -> bytes:
             f"The runner cannot open the output file ({error.strerror}). Write a "
             "plain file that the runner can read, at the path in ASCENT_OUTPUT."
         ) from None
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
         os.close(fd)
         raise OutputFileError(
             "The output path is not a regular file. Write a plain file, "
             "not a folder or a FIFO, at the path in ASCENT_OUTPUT."
+        )
+    # A second name means a hard link: the file can be one that the call did
+    # not write.
+    if info.st_nlink != 1:
+        os.close(fd)
+        raise OutputFileError(
+            "The output file has more than one name. Write a new file at the "
+            "path in ASCENT_OUTPUT, not a hard link."
         )
     with open(fd, "rb") as file:
         data = file.read(limit + 1)

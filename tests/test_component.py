@@ -476,7 +476,70 @@ def test_moved_call_directory_keeps_the_result(tmp_path, exit_code):
         _remove_moved(folder_file)
 
 
-@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf, 0, -1, True, "5", None])
+SWAP_CALL_DIR = """
+    import json, os, sys
+    out = os.environ["ASCENT_OUTPUT"]
+    folder = os.path.dirname(out)
+    if %(real)r:
+        with open(out, "w") as f:
+            f.write('{"output": "real"}')
+    os.rename(folder, folder + ".moved")
+    fake = folder + ".fake"
+    os.mkdir(fake)
+    with open(os.path.join(fake, "output.json"), "w") as f:
+        f.write('{"output": "fake"}')
+    if %(link)r:
+        os.symlink(fake, folder)
+    else:
+        os.rename(fake, folder)
+    open(%(folder_file)r, "w").write(folder)
+"""
+
+
+def _remove_swapped(folder_file):
+    """Remove every folder and link that a swap test command left.
+
+    Args:
+        folder_file: The file that holds the path of the original call folder.
+    """
+    folder = folder_file.read_text()
+    if os.path.islink(folder):
+        os.unlink(folder)
+    for path in (folder, folder + ".moved", folder + ".fake"):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.mark.parametrize("link", [False, True])
+@pytest.mark.parametrize("real", [True, False])
+def test_swapped_call_directory_does_not_redirect_the_read(tmp_path, link, real):
+    """A new folder or a link at the old call folder path cannot give a fake result."""
+    folder_file = tmp_path / "folder"
+    body = SWAP_CALL_DIR % {"real": real, "link": link, "folder_file": str(folder_file)}
+    entry = [PY, script(tmp_path, body)]
+    try:
+        if real:
+            assert call_run(entry, 1, timeout_s=10).output == "real"
+        else:
+            with pytest.raises(NoOutputError):
+                call_run(entry, 1, timeout_s=10)
+    finally:
+        _remove_swapped(folder_file)
+
+
+def test_hard_link_output_is_refused(tmp_path):
+    """An output path that is a hard link to another file is refused."""
+    target = tmp_path / "target.json"
+    target.write_text('{"output": "outside"}')
+    body = f'import os\nos.link({str(target)!r}, os.environ["ASCENT_OUTPUT"])\n'
+    with pytest.raises(OutputFileError, match="more than one name") as caught:
+        call_run([PY, script(tmp_path, body)], 1, timeout_s=10)
+    assert caught.value.code == "bad_output_file"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [math.nan, math.inf, -math.inf, 0, -1, True, "5", None, pytest.param(10**400, id="10**400")],
+)
 def test_invalid_time_limit_is_refused(tmp_path, bad):
     """A time limit that is not a finite number above 0 is refused before any start."""
     marker = tmp_path / "started"
@@ -512,6 +575,43 @@ def test_input_must_be_strict_json(tmp_path):
     with pytest.raises(ValueError, match="lone surrogate"):
         call_metric(entry, {**CASE, "output": {"\udc00": 1}}, timeout_s=10)
     assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ({1, 2}, "not strict JSON"),
+        (object(), "not strict JSON"),
+        ({1: "a"}, "key that is not a string"),
+        ({"a": [{"b": {2: "c"}}]}, "key that is not a string"),
+    ],
+)
+def test_input_must_hold_only_json_values(tmp_path, value, message):
+    """A value that JSON cannot hold, or a key that is not a string, is refused before any start."""
+    marker = tmp_path / "started"
+    entry = ["sh", "-c", f"touch {marker}"]
+    with pytest.raises(ValueError, match=message):
+        call_run(entry, value, timeout_s=10)
+    with pytest.raises(ValueError, match=message):
+        call_metric(entry, {**CASE, "output": value}, timeout_s=10)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("signature", ["output, /", "output, /, **kw"])
+def test_positional_only_parameter_is_refused(tmp_path, signature):
+    """A positional-only parameter with no default cannot get its value by name."""
+    script(tmp_path, f"def score({signature}):\n    return {{'score': 1}}\n")
+    with pytest.raises(ExitCodeError) as caught:
+        call_metric("component.py:score", CASE, timeout_s=10, cwd=tmp_path)
+    assert caught.value.exit_code == 2
+    assert "positional-only parameter 'output'" in caught.value.stderr
+    assert "remove the /" in caught.value.stderr
+
+
+def test_positional_only_parameter_with_default_is_allowed(tmp_path):
+    """A positional-only parameter with a default keeps its default."""
+    script(tmp_path, "def score(scale=0.5, /, *, output):\n    return {'score': scale}\n")
+    assert call_metric("component.py:score", CASE, timeout_s=10, cwd=tmp_path).result.score == 0.5
 
 
 def test_input_keeps_valid_unicode(tmp_path):

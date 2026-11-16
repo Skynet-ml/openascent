@@ -85,7 +85,7 @@ class NoOutputError(AscentError):
 
 
 class OutputFileError(AscentError):
-    """The output path is a link or not a regular file, cannot be opened, or is too large."""
+    """The output path is a link or a hard link, not a regular file, unreadable, or too large."""
 
     code = "bad_output_file"
 

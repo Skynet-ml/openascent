@@ -62,6 +62,15 @@ def _arguments(function, payload: dict) -> dict | None:
         parameter has no value.
     """
     parameters = inspect.signature(function).parameters.values()
+    for p in parameters:
+        if p.kind is p.POSITIONAL_ONLY and p.default is p.empty:
+            print(
+                f"The metric function has the positional-only parameter {p.name!r}. "
+                "The metric function gets its values by name, so remove the / "
+                "from the signature.",
+                file=sys.stderr,
+            )
+            return None
     if any(p.kind is p.VAR_KEYWORD for p in parameters):
         return dict(payload)
     arguments = {}

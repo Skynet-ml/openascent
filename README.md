@@ -84,7 +84,7 @@ Each error type has a stable `code`:
 | `time_limit` | The command ran longer than the time limit. The runner kills its whole process group. A process that leaves the group (for example with `setsid`) is not stopped; that needs an OS sandbox. |
 | `nonzero_exit` | The command exited with a code that is not 0. The error keeps the code and the tail of stderr. |
 | `no_output` | The command wrote no output file. |
-| `bad_output_file` | The output path is a link or not a regular file, the runner cannot open the file, or the file is larger than the size limit (1 MiB by default). |
+| `bad_output_file` | The output path is a symbolic link or a hard link, or not a regular file, the runner cannot open the file, or the file is larger than the size limit (1 MiB by default). The runner reads the output through the call directory that it made, so a command that swaps that directory cannot redirect the read. |
 | `invalid_json` | The output file is not strict JSON: not UTF-8, a `NaN` or `Infinity` token, a float literal that overflows (`1e400`), an integer longer than 4300 digits, a duplicate key, or a lone surrogate escape such as `"\ud800"`. |
 | `invalid_form` | The output file is valid JSON but not the valid form, for example a metric result with no `score`, or a `score` that is an integer too large for a float. A large integer in a run output is valid. |
 
@@ -97,7 +97,7 @@ The function form obeys the same two-file rule. The package starts a child Pytho
 The child loads the file, calls the function, and writes the output file. The time limit and all checks apply the same way to both forms.
 
 - In a run call, the child calls `function(input_value)` and writes `{"output": <return value>}`.
-- In a metric call, the child calls the function with the input fields that it names as parameters: `input`, `expected`, `output`, `elapsed_s`. A function with `**kwargs` gets every field. The return value is the metric answer object.
+- In a metric call, the child calls the function with the input fields that it names as parameters: `input`, `expected`, `output`, `elapsed_s`. A function with `**kwargs` gets every field. The child gives each value by name, so a positional-only parameter (before a `/`) with no default is an error with exit code 2. The return value is the metric answer object.
 - An exception in the function is a `nonzero_exit` failure. The traceback is in stderr.
 
 ## The `ascent score` command

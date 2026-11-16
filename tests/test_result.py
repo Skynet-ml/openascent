@@ -173,7 +173,7 @@ def test_to_dict_omits_absent_keys():
     }
 
 
-# The three codes for a large number, pinned (F5): the loader refuses a float
+# The codes for a large number, pinned: the loader refuses a float
 # literal that overflows and an integer past Python's digit limit; the metric
 # form refuses a large integer score; a run output keeps a large integer.
 LARGE_NUMBERS = [
