@@ -319,6 +319,7 @@ git show <base_commit>:ascent.toml | shasum -a 256
 ```
 
 `metric_sha256` is the hash of the metric files: the files that the runner puts where it runs the metric.
+The standard does not fix this set of files. The documentation of the runner names it.
 Each file gives one part: `<path>\0<length>\0<hash>`.
 `<path>` is the path of the file in UTF-8, relative to the repository root, with `/` between folders, and with no `./` and no `/` at the start.
 `<length>` is the byte length of the file in decimal. `<hash>` is the SHA-256 hex of the file bytes.
@@ -369,11 +370,14 @@ shasum -a 256 change.patch
 
 1. Get the commit `base_commit`: `git checkout <base_commit>`.
 2. Compute `contract_sha256`, `metric_sha256` and `cases_sha256`. Compare each one with the record.
+   When `cases_sha256` is `null`, the run has no cases, and there is no cases hash to compare.
 3. Get the patch from the run result. Compute its hash, and compare it with `change_sha256`. Apply the patch: `git apply change.patch`.
+   When `change_sha256` is `null`, the run made no change: skip this step.
 4. Run the metric on the cases that give the final score.
    The standard does not fix these cases, or how the case scores combine into one score. The documentation of the runner says both.
    Skynet, for example, uses the mean of the scores of the held-out cases (the positions in `split.held_out`).
 5. Compare the score with `final_score`.
+   When `final_score` is `null`, the run gave no final score, and there is no score to compare.
 
 ### The schema
 
