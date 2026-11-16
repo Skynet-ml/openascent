@@ -338,13 +338,16 @@ python3 -c 'import hashlib,os,sys; h=lambda b: hashlib.sha256(b).hexdigest(); pr
 
 `cases_sha256` depends on `cases_source`:
 
-- `file`: the hash of the bytes of the cases file.
+- `file`: the cases are one file in the repository at `base_commit`. The hash is of the bytes of that file.
+  The documentation of the runner says which file it is.
 
   ```sh
   shasum -a 256 cases.jsonl
   ```
 
-- `request`: the cases came with the run request. The hash is of the compact JSON text of the cases, with sorted keys, in UTF-8.
+- `request`: the cases came with the run request. The checker gets the cases from the person who ran the run.
+  The hash proves that the cases are the same.
+  The hash is of the compact JSON text of the cases, with sorted keys, in UTF-8.
   In Python: `json.dumps(cases, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")`.
   This Python expression defines the text, also the form of each number.
   For the cases in `cases.json`:
@@ -371,9 +374,13 @@ shasum -a 256 change.patch
 1. Get the commit `base_commit`: `git checkout <base_commit>`.
 2. Compute `contract_sha256`, `metric_sha256` and `cases_sha256`. Compare each one with the record.
    When `cases_sha256` is `null`, the run has no cases, and there is no cases hash to compare.
-3. Get the patch from the run result. Compute its hash, and compare it with `change_sha256`. Apply the patch: `git apply change.patch`.
+3. Get the patch text from the run result. The documentation of the runner says where the result holds it.
+   Compute its hash, and compare it with `change_sha256`. Apply the patch: `git apply change.patch`.
    When `change_sha256` is `null`, the run made no change: skip this step.
 4. Run the metric on the cases that give the final score.
+   For each case, get the output of the changed program for the case (see "Run call").
+   Then make the metric input from the case and that output, and start the metric (see "Metric call").
+   The contract `ascent.toml` names the command of the metric and the commands of the program.
    The standard does not fix these cases, or how the case scores combine into one score. The documentation of the runner says both.
    Skynet, for example, uses the mean of the scores of the held-out cases (the positions in `split.held_out`).
 5. Compare the score with `final_score`.
