@@ -605,6 +605,8 @@ def test_input_must_hold_only_json_values(tmp_path, value, message):
         ("run", "{'a': {True: 1}}", "True"),
         ("metric", "{'score': 1.0, None: 2}", "None"),
         ("run", "{1: 'a', '1': 'b'}", "1"),
+        ("run", "{(1, 2): 'a'}", "(1, 2)"),
+        ("metric", "(d := {1: 'a'}, d.__setitem__('self', d))[0]", "1"),
     ],
 )
 def test_function_result_needs_string_keys(tmp_path, kind, returned, key):
@@ -616,6 +618,16 @@ def test_function_result_needs_string_keys(tmp_path, kind, returned, key):
         call("component.py:go", value, timeout_s=10, cwd=tmp_path)
     assert caught.value.exit_code == 2
     assert f"the key {key}, which is not a string" in caught.value.stderr
+
+
+def test_function_result_with_a_cycle_fails_without_a_hang(tmp_path):
+    """A cyclic return value with string keys only still fails in json.dumps."""
+    script(tmp_path, "def go(value):\n    d = {'a': 1}\n    d['self'] = d\n    return d\n")
+    with pytest.raises(ExitCodeError) as caught:
+        call_run("component.py:go", 1, timeout_s=10, cwd=tmp_path)
+    assert caught.value.code == "nonzero_exit"
+    assert caught.value.exit_code == 1
+    assert "Circular reference" in caught.value.stderr
 
 
 def test_cli_deeply_nested_input_is_a_usage_error(tmp_path, capsys):

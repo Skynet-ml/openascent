@@ -47,8 +47,8 @@ def main(argv: list[str]) -> int:
         if arguments is None:
             return 2
         result = function(**arguments)
-    # dumps first: it refuses a cyclic value, so the key walk always ends.
-    text = json.dumps(result)
+    # The walk runs before dumps: dumps turns some keys (1, None) into strings
+    # in silence and fails on others (a tuple) with a TypeError.
     key = _non_string_key(result)
     if key is not None:
         print(
@@ -57,7 +57,7 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
-    _write(os.environ["ASCENT_OUTPUT"], text)
+    _write(os.environ["ASCENT_OUTPUT"], json.dumps(result))
     return 0
 
 
@@ -65,15 +65,21 @@ def _non_string_key(value) -> tuple | None:
     """Find a dict key that is not a string, at any depth.
 
     Args:
-        value: A value that ``json.dumps`` accepts, so it has no cycle.
+        value: The return value. It can hold a cycle; the walk visits each
+            container once.
 
     Returns:
         A one-item tuple with the first such key, or ``None`` when every key
         is a string. The tuple tells a found ``None`` key from no key.
     """
     pending = [value]
+    seen = set()
     while pending:
         item = pending.pop()
+        if isinstance(item, dict | list | tuple):
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
         if isinstance(item, dict):
             for key in item:
                 if not isinstance(key, str):
