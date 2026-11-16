@@ -20,7 +20,8 @@ It obeys one rule:
 
 The runner starts the command with an empty stdin.
 Each call gets a new directory and a new output path. The runner tries to remove the directory after the call.
-A command that moves or links its directory away can leave files behind.
+A command that moves or links its directory away, or makes a directory that the runner cannot remove, can leave files behind.
+The result of the call does not change then.
 What the command prints on stdout and stderr is log text. It is never part of the result, so a debug print cannot change the result.
 
 ## The two kinds of call
@@ -80,7 +81,7 @@ Each error type has a stable `code`:
 
 | Code | Cause |
 | --- | --- |
-| `start_failed` | The command cannot start, for example it is not found or not executable, or the working directory or the environment is not valid. |
+| `start_failed` | The command cannot start: it is not found or not executable, the function file does not exist, or the working directory or the environment is not valid. A relative function path with a current directory that no longer exists also gives this code. |
 | `time_limit` | The command ran longer than the time limit. The runner kills its whole process group. A process that leaves the group (for example with `setsid`) is not stopped; that needs an OS sandbox. |
 | `nonzero_exit` | The command exited with a code that is not 0. The error keeps the code and the tail of stderr. |
 | `no_output` | The command wrote no output file. |

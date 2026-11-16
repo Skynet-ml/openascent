@@ -261,10 +261,11 @@ def _call(
     _check_output_limit(max_output_bytes)
     data = _input_bytes(payload)
     argv = _argv(parse_entry(entry), kind, cwd)
-    # A command can move or link its call directory away; a failed cleanup
-    # must not lose a valid result.
-    with tempfile.TemporaryDirectory(prefix="ascent-", ignore_cleanup_errors=True) as tmp:
-        call_dir = Path(tmp)
+    # A command can move or link its call directory away, or make a tree that the
+    # cleanup cannot remove; a failed cleanup must not lose a valid result.
+    call_tmp = tempfile.TemporaryDirectory(prefix="ascent-", ignore_cleanup_errors=True)
+    try:
+        call_dir = Path(call_tmp.name)
         input_path = call_dir / "input.json"
         output_path = call_dir / "output.json"
         input_path.write_bytes(data)
@@ -297,6 +298,13 @@ def _call(
                 raise
         finally:
             os.close(dir_fd)
+    finally:
+        # ignore_cleanup_errors hides only OSError, and the mode-reset retry
+        # recurses once for each level of a deep mode-000 tree.
+        try:
+            call_tmp.cleanup()
+        except RecursionError:
+            pass
     return value, stdout, stderr, elapsed
 
 

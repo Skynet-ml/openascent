@@ -45,7 +45,9 @@ class AscentError(Exception):
 
 
 class StartError(AscentError):
-    """The command cannot start: it is not found or not executable."""
+    """The command cannot start: it is not found or not executable, the function file
+    does not exist, or the working directory or the environment is not valid.
+    """
 
     code = "start_failed"
 

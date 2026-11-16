@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from pathlib import Path
@@ -448,6 +449,17 @@ def test_cli_function_entry_in_a_folder_with_a_space(tmp_path, capsys, monkeypat
     assert json.loads(capsys.readouterr().out) == {"score": 1.0}
 
 
+def test_cli_locked_tree_prints_one_line(tmp_path, capsys, private_tmp):
+    """``ascent score`` reports the typed failure, not a cleanup traceback."""
+    case = tmp_path / "case.json"
+    case.write_text(json.dumps(CASE))
+    script(tmp_path, LOCKED_TREE % 1, name="locked.py")
+    assert main(["score", "--entry", f"{PY} {tmp_path / 'locked.py'}", "--input", str(case)]) == 1
+    err = capsys.readouterr().err
+    assert "ascent: nonzero_exit:" in err
+    assert "Traceback" not in err
+
+
 def test_cli_usage_error(tmp_path):
     """A usage error exits with 2."""
     with pytest.raises(SystemExit) as caught:
@@ -527,6 +539,56 @@ def _remove_moved(folder_file):
     folder = folder_file.read_text()
     os.unlink(folder)
     shutil.rmtree(folder + ".moved")
+
+
+LOCKED_TREE = """
+    import os, sys
+    out = os.environ["ASCENT_OUTPUT"]
+    with open(out, "w") as f:
+        f.write('{"output": "kept"}')
+    levels = [os.path.join(os.path.dirname(out), "d")]
+    for _ in range(299):
+        levels.append(os.path.join(levels[-1], "d"))
+    os.makedirs(levels[-1])
+    for level in reversed(levels):
+        os.chmod(level, 0)
+    sys.exit(%d)
+"""
+
+
+@pytest.fixture
+def private_tmp(tmp_path, monkeypatch):
+    """Point the call folders at a test folder, and unlock and remove what stays.
+
+    Args:
+        tmp_path: The test folder.
+        monkeypatch: The pytest monkeypatch fixture.
+
+    Yields:
+        The folder that holds the call folders.
+    """
+    folder = tmp_path / "calls"
+    folder.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(folder))
+    yield folder
+    for top, dirs, _ in os.walk(folder):
+        for name in dirs:
+            os.chmod(os.path.join(top, name), 0o700)
+    shutil.rmtree(folder)
+
+
+def test_locked_tree_keeps_the_result(tmp_path, private_tmp):
+    """A deep tree that the cleanup cannot remove does not change a valid result."""
+    entry = [PY, script(tmp_path, LOCKED_TREE % 0)]
+    assert call_run(entry, 1, timeout_s=30).output == "kept"
+
+
+def test_locked_tree_keeps_the_exit_code_error(tmp_path, private_tmp):
+    """A deep tree that the cleanup cannot remove does not hide a typed failure."""
+    entry = [PY, script(tmp_path, LOCKED_TREE % 1)]
+    with pytest.raises(ExitCodeError) as caught:
+        call_run(entry, 1, timeout_s=30)
+    assert caught.value.exit_code == 1
 
 
 @pytest.mark.parametrize("exit_code", [0, 3])
