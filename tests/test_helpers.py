@@ -174,17 +174,26 @@ def test_call_name_rule(server, monkeypatch, stage, variable):
 
 
 @pytest.mark.parametrize("value", [None, ""])
-def test_call_absent_stage(monkeypatch, value):
+@pytest.mark.parametrize(
+    ("stage", "variable"),
+    [
+        ("planner-v2", "ASCENT_STAGE_PLANNER_V2_URL"),
+        ("Judge.Final", "ASCENT_STAGE_JUDGE_FINAL_URL"),
+    ],
+)
+def test_call_absent_stage(monkeypatch, stage, variable, value):
     """An absent or empty stage variable names the stage, the variable and the fix."""
     if value is not None:
-        monkeypatch.setenv("ASCENT_STAGE_PLANNER_V2_URL", value)
+        monkeypatch.setenv(variable, value)
     with pytest.raises(StageError) as caught:
-        call("planner-v2", 1)
+        call(stage, 1)
     message = str(caught.value)
-    assert "'planner-v2'" in message
-    assert "ASCENT_STAGE_PLANNER_V2_URL" in message
+    assert repr(stage) in message
+    assert variable in message
     assert "no stage of this name" in message
-    assert "[target.planner-v2]" in message
+    assert message.endswith("Add the stage to the contract.")
+    # A contract header with the plain name is wrong for a name such as Judge.Final.
+    assert "[target." not in message
 
 
 def test_call_error_answer(server, monkeypatch):

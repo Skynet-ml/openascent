@@ -88,7 +88,7 @@ def call(stage: str, input: object = None) -> object:
     if not url:
         raise StageError(
             f"The variable {variable} for the stage {stage!r} is absent or empty. "
-            f"The contract gives the metric no stage of this name. Add a [target.{stage}] stage."
+            "The contract gives the metric no stage of this name. Add the stage to the contract."
         )
     what = f"The stage {stage!r}"
     answer = _load(_post(url, body, {}, StageError, what), StageError, what)
