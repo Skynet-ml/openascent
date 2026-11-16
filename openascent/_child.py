@@ -48,12 +48,12 @@ def main(argv: list[str]) -> int:
             return 2
         result = function(**arguments)
     # The walk runs before dumps: dumps turns some keys (1, None) into strings
-    # in silence and fails on others (a tuple) with a TypeError.
-    key = _non_string_key(result)
-    if key is not None:
+    # in silence and fails on others (a tuple) with a TypeError. The message
+    # holds no key: a key's repr can raise or be very large.
+    if _has_non_string_key(result):
         print(
-            f"The function returned a dict with the key {key[0]!r}, which is not a string. "
-            "JSON would turn it into a string in silence. Use only string keys in dicts.",
+            "The function returned a dict with a key that is not a string. "
+            "Use only string keys in dicts.",
             file=sys.stderr,
         )
         return 2
@@ -61,16 +61,15 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-def _non_string_key(value) -> tuple | None:
-    """Find a dict key that is not a string, at any depth.
+def _has_non_string_key(value) -> bool:
+    """Tell if a dict at any depth has a key that is not a string.
 
     Args:
         value: The return value. It can hold a cycle; the walk visits each
             container once.
 
     Returns:
-        A one-item tuple with the first such key, or ``None`` when every key
-        is a string. The tuple tells a found ``None`` key from no key.
+        True when some dict key is not a string.
     """
     pending = [value]
     seen = set()
@@ -83,11 +82,11 @@ def _non_string_key(value) -> tuple | None:
         if isinstance(item, dict):
             for key in item:
                 if not isinstance(key, str):
-                    return (key,)
+                    return True
             pending.extend(item.values())
         elif isinstance(item, list | tuple):
             pending.extend(item)
-    return None
+    return False
 
 
 def _arguments(function, payload: dict) -> dict | None:

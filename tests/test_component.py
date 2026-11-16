@@ -598,18 +598,27 @@ def test_input_must_hold_only_json_values(tmp_path, value, message):
 
 
 @pytest.mark.parametrize(
-    ("kind", "returned", "key"),
+    ("kind", "returned"),
     [
-        ("run", "{1: 'a'}", "1"),
-        ("metric", "{'score': 1.0, 'scores': [{'name': 'a', 'score': 1.0}, {1: 'b'}]}", "1"),
-        ("run", "{'a': {True: 1}}", "True"),
-        ("metric", "{'score': 1.0, None: 2}", "None"),
-        ("run", "{1: 'a', '1': 'b'}", "1"),
-        ("run", "{(1, 2): 'a'}", "(1, 2)"),
-        ("metric", "(d := {1: 'a'}, d.__setitem__('self', d))[0]", "1"),
+        pytest.param("run", "{1: 'a'}", id="int-key"),
+        pytest.param(
+            "metric",
+            "{'score': 1.0, 'scores': [{'name': 'a', 'score': 1.0}, {1: 'b'}]}",
+            id="key-in-list",
+        ),
+        pytest.param("run", "{'a': {True: 1}}", id="true-key"),
+        pytest.param("metric", "{'score': 1.0, None: 2}", id="none-key"),
+        pytest.param("run", "{1: 'a', '1': 'b'}", id="int-and-string-key"),
+        pytest.param("run", "{(1, 2): 'a'}", id="tuple-key"),
+        pytest.param(
+            "metric", "(d := {'x': {1: 'a'}}, d.__setitem__('self', d))[0]", id="key-behind-cycle"
+        ),
+        pytest.param(
+            "run", "{type('K', (), {'__repr__': lambda self: 1 / 0})(): 1}", id="key-repr-raises"
+        ),
     ],
 )
-def test_function_result_needs_string_keys(tmp_path, kind, returned, key):
+def test_function_result_needs_string_keys(tmp_path, kind, returned):
     """A returned dict key that is not a string is refused, not turned into a string."""
     script(tmp_path, f"def go(*args, **kwargs):\n    return {returned}\n")
     call = call_run if kind == "run" else call_metric
@@ -617,7 +626,10 @@ def test_function_result_needs_string_keys(tmp_path, kind, returned, key):
     with pytest.raises(ExitCodeError) as caught:
         call("component.py:go", value, timeout_s=10, cwd=tmp_path)
     assert caught.value.exit_code == 2
-    assert f"the key {key}, which is not a string" in caught.value.stderr
+    assert caught.value.stderr.strip() == (
+        "The function returned a dict with a key that is not a string. "
+        "Use only string keys in dicts."
+    )
 
 
 def test_function_result_with_a_cycle_fails_without_a_hang(tmp_path):
