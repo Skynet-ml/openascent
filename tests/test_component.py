@@ -322,6 +322,61 @@ def test_too_large_output(tmp_path):
     assert call_run(entry, 1, timeout_s=10, max_output_bytes=1000).output == "x" * 200
 
 
+@pytest.mark.parametrize("size", [100, 200000])
+def test_output_size_limit_boundary(tmp_path, size):
+    """A file of exactly the limit passes; one byte more is refused, also past one chunk."""
+    text = json.dumps({"output": "x" * (size - len('{"output": ""}'))})
+    assert len(text) == size
+    entry = writes(tmp_path, text)
+    assert (
+        call_run(entry, 1, timeout_s=10, max_output_bytes=size).output == json.loads(text)["output"]
+    )
+    with pytest.raises(OutputFileError, match=f"larger than {size - 1} bytes") as caught:
+        call_run(entry, 1, timeout_s=10, max_output_bytes=size - 1)
+    assert caught.value.code == "bad_output_file"
+
+
+@pytest.mark.parametrize("limit", [sys.maxsize, 2**50])
+def test_large_output_size_limit_works(tmp_path, limit):
+    """A very large limit does not size a read buffer from the limit."""
+    entry = writes(tmp_path, json.dumps({"output": "ok"}))
+    assert call_run(entry, 1, timeout_s=10, max_output_bytes=limit).output == "ok"
+
+
+@pytest.mark.parametrize("bad", [2.0e6, "100", None, True, 0, -1])
+def test_invalid_output_size_limit_is_refused(tmp_path, bad):
+    """An output size limit that is not an integer above 0 is refused before any start."""
+    marker = tmp_path / "started"
+    entry = ["sh", "-c", f"touch {marker}"]
+    with pytest.raises(ValueError, match="output size limit"):
+        call_run(entry, 1, timeout_s=10, max_output_bytes=bad)
+    with pytest.raises(ValueError, match="output size limit"):
+        call_metric(entry, CASE, timeout_s=10, max_output_bytes=bad)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("entry", [3, [""]])
+def test_entry_in_neither_form_is_refused(entry):
+    """An entry that is neither a command nor a function is a ValueError."""
+    with pytest.raises(ValueError, match="is not valid"):
+        call_run(entry, 1, timeout_s=10)
+    with pytest.raises(ValueError, match="is not valid"):
+        call_metric(entry, CASE, timeout_s=10)
+
+
+def test_function_entry_in_a_deleted_current_directory(tmp_path, monkeypatch):
+    """In a deleted current directory, only a relative function path fails to start."""
+    script(tmp_path, "def go(value):\n    return 'here'\n")
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    # monkeypatch restores the old current directory after the test.
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    assert call_run(f"{tmp_path / 'component.py'}:go", 1, timeout_s=10).output == "here"
+    with pytest.raises(StartError, match="current directory is not valid"):
+        call_run("component.py:go", 1, timeout_s=10)
+
+
 def test_invalid_json_output(tmp_path):
     """An output file that is not JSON is invalid JSON."""
     with pytest.raises(InvalidJsonError) as caught:

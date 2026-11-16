@@ -40,6 +40,7 @@ from .result import (
 MAX_OUTPUT_BYTES = 1024 * 1024
 LOG_TAIL_BYTES = 64 * 1024
 _CHILD = Path(__file__).resolve().with_name("_child.py")
+_READ_CHUNK_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -130,8 +131,10 @@ def call_run(
         The output value, the bounded log text and the elapsed time.
 
     Raises:
-        ValueError: The time limit is not a finite number greater than 0, or the
-            input value is not strict JSON (see ``_input_bytes``).
+        ValueError: The time limit is not a finite number greater than 0, the
+            output size limit is not an integer greater than 0, the entry is in
+            neither form (see ``parse_entry``), or the input value is not strict
+            JSON (see ``_input_bytes``).
         AscentError: A subclass names the cause of the failure.
     """
     output, stdout, stderr, elapsed = _call(
@@ -172,9 +175,11 @@ def call_metric(
         The checked metric result, the bounded log text and the elapsed time.
 
     Raises:
-        ValueError: The time limit is not a finite number greater than 0, or the
-            payload has no ``input`` or no ``output`` key, has an ``elapsed_s``
-            that is not a number, or is not strict JSON (see ``_input_bytes``).
+        ValueError: The time limit is not a finite number greater than 0, the
+            output size limit is not an integer greater than 0, the entry is in
+            neither form (see ``parse_entry``), or the payload has no ``input``
+            or no ``output`` key, has an ``elapsed_s`` that is not a number, or
+            is not strict JSON (see ``_input_bytes``).
         AscentError: A subclass names the cause of the failure.
     """
     if not isinstance(payload, dict) or "input" not in payload or "output" not in payload:
@@ -224,10 +229,12 @@ def _call(
         The checked value, the stdout tail, the stderr tail and the elapsed time.
 
     Raises:
-        ValueError: The time limit or the input object is not valid.
+        ValueError: The time limit, the output size limit, the entry or the
+            input object is not valid.
         AscentError: A subclass names the cause of the failure.
     """
     _check_timeout(timeout_s)
+    _check_output_limit(max_output_bytes)
     data = _input_bytes(payload)
     argv = _argv(parse_entry(entry), kind, cwd)
     # A command can move or link its call directory away; a failed cleanup
@@ -292,6 +299,22 @@ def _check_timeout(timeout_s: object) -> None:
         )
 
 
+def _check_output_limit(limit: object) -> None:
+    """Refuse an output size limit that is not an integer greater than 0.
+
+    Args:
+        limit: The largest output file in bytes.
+
+    Raises:
+        ValueError: The limit is not valid. A bad limit would otherwise fail
+            only after the command ran.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError(
+            "The output size limit is not valid. Give a whole number of bytes greater than 0."
+        )
+
+
 def _input_bytes(payload: dict) -> bytes:
     """Encode the input object as strict UTF-8 JSON.
 
@@ -348,12 +371,23 @@ def _argv(entry: Entry, kind: str, cwd: str | os.PathLike | None) -> list[str]:
         The command line.
 
     Raises:
-        StartError: The function file does not exist.
+        StartError: The function file does not exist, or the path is relative
+            and the current directory is not valid.
     """
     if isinstance(entry, tuple):
         return list(entry)
-    # The child runs inside cwd, so a relative path would resolve twice there.
-    path = (Path(cwd or os.getcwd()) / entry.path).absolute()
+    path = Path(entry.path)
+    if not path.is_absolute():
+        # The child runs inside cwd, so a relative path would resolve twice there.
+        # getcwd fails when the current directory was deleted.
+        try:
+            path = (Path(cwd or os.getcwd()) / path).absolute()
+        except OSError as error:
+            raise StartError(
+                f"The current directory is not valid ({error.strerror}), so the runner "
+                f"cannot find the function file {entry.path}. Give an absolute path "
+                "or a working directory that exists."
+            ) from None
     # os.path.isfile returns False on an OSError such as a name that is too long.
     if not os.path.isfile(path):
         raise StartError(
@@ -481,9 +515,18 @@ def _read_output(dir_fd: int, limit: int) -> bytes:
             "The output file has more than one name. Write a new file at the "
             "path in ASCENT_OUTPUT, not a hard link."
         )
+    # Read in chunks: file.read(limit + 1) would size its buffer from a large limit.
+    chunks = []
+    total = 0
     with open(fd, "rb") as file:
-        data = file.read(limit + 1)
-    if len(data) > limit:
+        while total <= limit:
+            chunk = file.read(min(_READ_CHUNK_BYTES, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    data = b"".join(chunks)
+    if total > limit:
         raise OutputFileError(
             f"The output file is larger than {limit} bytes. Write a smaller result."
         )
