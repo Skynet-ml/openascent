@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openascent"
+version = "0.0.1"
+description = "Reference Python package of the OpenAscent standard for optimization runs (placeholder release)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = []
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Repository = "https://github.com/Skynet-ml/openascent"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openascent"]
+
+[tool.hatch.build.targets.sdist]
+include = ["openascent", "README.md", "LICENSE", "pyproject.toml"]
