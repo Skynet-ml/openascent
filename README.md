@@ -294,6 +294,9 @@ The record is a closed object. An unknown key is an error. All keys are required
 | `requirements_passed` | boolean | Verdict key. `true` when every requirement passed. Present only when the contract has requirements. |
 | `failed_requirements` | array | Verdict key. The requirements that failed. Present only when the contract has requirements. |
 
+A record has both `requirements_passed` and `failed_requirements`, or neither.
+`requirements_passed` is `true` exactly when `failed_requirements` is empty.
+
 A SHA-256 hex value is exactly 64 lowercase hex characters. `true` and `false` are not numbers.
 
 The `split` object is closed. It has exactly these keys:
@@ -315,18 +318,18 @@ Each hash is a SHA-256 value in lowercase hex.
 git show <base_commit>:ascent.toml | shasum -a 256
 ```
 
-`metric_sha256` is the hash of the files that the metric box gets.
+`metric_sha256` is the hash of the metric files: the files that the runner puts where it runs the metric.
 Each file gives one part: `<path>\0<length>\0<hash>`.
-`<path>` is the path of the file in UTF-8, relative to the repository root, with `/` between folders.
+`<path>` is the path of the file in UTF-8, relative to the repository root, with `/` between folders, and with no `./` and no `/` at the start.
 `<length>` is the byte length of the file in decimal. `<hash>` is the SHA-256 hex of the file bytes.
 `\0` is one zero byte.
 The parts are in sorted path order: the order of the paths as UTF-8 bytes.
 The parts join with no byte between them. Each part ends with exactly 64 hex characters, so the join has only one meaning.
 `metric_sha256` is the hash of the joined parts. There is no special first part and no fixed path.
 Metric code that comes in the run request counts as one file.
-Its path is the path where the runner puts the file for the metric box, relative to the repository root.
+Its path is the path where the runner puts the file to run the metric, relative to the repository root.
 
-Run this in the repository root, with the path of each metric file:
+Run this in the repository root. Give the path of each metric file in the form above, for example `lib/util.py`, not `./lib/util.py`.
 
 ```sh
 python3 -c 'import hashlib,sys; h=lambda b: hashlib.sha256(b).hexdigest(); print(h(b"".join(p+b"\0"+str(len(d)).encode()+b"\0"+h(d).encode() for p in sorted(a.encode() for a in sys.argv[1:]) for d in [open(p,"rb").read()])))' metric.py lib/util.py

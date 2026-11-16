@@ -83,11 +83,11 @@
       "type": "boolean"
     },
     "requirements_passed": {
-      "description": "True when every contract requirement passed. Present only when the contract has requirements.",
+      "description": "True exactly when failed_requirements is empty. Present together with failed_requirements, only when the contract has requirements.",
       "type": "boolean"
     },
     "failed_requirements": {
-      "description": "The requirements that failed. Present only when the contract has requirements.",
+      "description": "The requirements that failed. Present together with requirements_passed, only when the contract has requirements.",
       "type": "array",
       "items": {"$ref": "#/$defs/failed_requirement"}
     }
@@ -106,18 +106,33 @@
       }
     }
   ],
+  "dependentRequired": {
+    "requirements_passed": ["failed_requirements"],
+    "failed_requirements": ["requirements_passed"]
+  },
+  "allOf": [
+    {
+      "$comment": "No required list in the if: dependentRequired already makes both keys present or both absent.",
+      "if": {"properties": {"requirements_passed": {"const": true}}},
+      "then": {"properties": {"failed_requirements": {"maxItems": 0}}}
+    },
+    {
+      "if": {"properties": {"requirements_passed": {"const": false}}},
+      "then": {"properties": {"failed_requirements": {"minItems": 1}}}
+    }
+  ],
   "$defs": {
     "sha256": {
       "description": "64 lowercase hex characters.",
       "type": "string",
-      "pattern": "^[0-9a-f]*$",
+      "pattern": "^[0-9a-f]{64}$",
       "minLength": 64,
       "maxLength": 64
     },
     "sha1": {
       "description": "40 lowercase hex characters.",
       "type": "string",
-      "pattern": "^[0-9a-f]*$",
+      "pattern": "^[0-9a-f]{40}$",
       "minLength": 40,
       "maxLength": 40
     },

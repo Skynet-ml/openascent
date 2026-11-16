@@ -51,6 +51,9 @@ FULL_RECORD = {
 }
 
 REQUIRED = sorted(SCHEMA["required"])
+# Not read from the schema: an empty required list in the schema must not empty these tests.
+SPLIT_REQUIRED = sorted(FULL_RECORD["split"])
+FAILED_REQUIRED = sorted(FULL_RECORD["failed_requirements"][0])
 
 
 def _record(**changes):
@@ -140,6 +143,27 @@ def test_missing_required_key_fails(key):
     assert not VALIDATOR.is_valid(record)
 
 
+@pytest.mark.parametrize("key", SPLIT_REQUIRED)
+def test_missing_split_key_fails(key):
+    """Each key of the split is required."""
+    split = _split()
+    del split[key]
+    assert not VALIDATOR.is_valid(_record(split=split))
+
+
+@pytest.mark.parametrize("key", FAILED_REQUIRED)
+def test_missing_failed_requirement_key_fails(key):
+    """Each key of a failed requirement is required."""
+    entry = _failed()
+    del entry[key]
+    assert not VALIDATOR.is_valid(_record(failed_requirements=[entry]))
+
+
+def test_record_that_is_not_an_object_fails():
+    """A record must be a JSON object."""
+    assert not VALIDATOR.is_valid([])
+
+
 INVALID = [
     ("version 2", {"record_version": 2}),
     ("version as string", {"record_version": "1"}),
@@ -147,11 +171,18 @@ INVALID = [
     ("hash in upper case", {"contract_sha256": "A" * 64}),
     ("hash too short", {"metric_sha256": "a" * 63}),
     ("hash too long", {"metric_sha256": "a" * 65}),
-    ("hash with trailing newline", {"contract_sha256": "a" * 64 + "\n"}),
+    ("hash of 64 hex and a newline", {"contract_sha256": "a" * 64 + "\n"}),
+    ("hash of 63 hex and a newline", {"metric_sha256": "a" * 63 + "\n"}),
     ("hash not hex", {"change_sha256": "g" * 64}),
+    ("hash as number", {"contract_sha256": 1}),
+    ("cases hash not hex", {"cases_sha256": "g" * 64}),
     ("base commit too short", {"base_commit": "d" * 39}),
-    ("base commit of 41 characters", {"base_commit": "d" * 40 + "\n"}),
+    ("base commit of 40 hex and a newline", {"base_commit": "d" * 40 + "\n"}),
+    ("base commit of 39 hex and a newline", {"base_commit": "d" * 39 + "\n"}),
+    ("base commit of 63 hex and a newline", {"base_commit": "d" * 63 + "\n"}),
     ("base commit of 50 characters", {"base_commit": "d" * 50}),
+    ("base commit not hex", {"base_commit": "g" * 40}),
+    ("base commit as number", {"base_commit": 1}),
     ("bad metric source", {"metric_source": "file"}),
     ("cases hash with null source", {"cases_source": None}),
     ("cases source with null hash", {"cases_sha256": None}),
@@ -161,13 +192,29 @@ INVALID = [
     ("true as seed", {"seed": True}),
     ("score as string", {"final_score": "0.9"}),
     ("contract_met null", {"contract_met": None}),
+    ("image as number", {"image": 1}),
+    ("target_reached as string", {"target_reached": "yes"}),
+    ("requirements_passed as string", {"requirements_passed": "yes"}),
+    ("split as list", {"split": ["pairs"]}),
     ("unknown key in split", {"split": _split(extra=1)}),
     ("empty split rule", {"split": _split(rule="")}),
+    ("split rule as number", {"split": _split(rule=1)}),
+    ("true as split seed", {"split": _split(seed=True)}),
+    ("split seed as string", {"split": _split(seed="1")}),
+    ("positions as number", {"split": _split(search=0)}),
     ("negative position", {"split": _split(held_out=[-1])}),
+    ("negative validation position", {"split": _split(validation=[-1])}),
     ("true as position", {"split": _split(search=[True])}),
+    ("failed requirements as object", {"failed_requirements": {}}),
+    ("failed requirement as string", {"failed_requirements": ["latency_s"]}),
     ("unknown key in failed requirement", {"failed_requirements": [_failed(weight=1)]}),
+    ("failed requirement name as number", {"failed_requirements": [_failed(name=1)]}),
     ("bad direction", {"failed_requirements": [_failed(direction="up")]}),
     ("true as limit", {"failed_requirements": [_failed(limit=True)]}),
+    ("true as value", {"failed_requirements": [_failed(value=True)]}),
+    ("failed requirement reason as number", {"failed_requirements": [_failed(reason=1)]}),
+    ("requirements passed with a failed requirement", {"requirements_passed": True}),
+    ("requirements failed with no failed requirement", {"failed_requirements": []}),
 ]
 
 
@@ -175,6 +222,14 @@ INVALID = [
 def test_invalid_form_fails(name, changes):
     """Each invalid form is an error."""
     assert not VALIDATOR.is_valid(_record(**changes))
+
+
+@pytest.mark.parametrize("key", ["requirements_passed", "failed_requirements"])
+def test_one_requirement_verdict_key_alone_fails(key):
+    """A record has both requirement verdict keys or neither."""
+    record = _record()
+    del record[key]
+    assert not VALIDATOR.is_valid(record)
 
 
 def _minimal():
@@ -200,7 +255,19 @@ def _minimal():
 
 VALID = [
     ("all nullable keys null, no verdict keys", _minimal()),
-    ("empty failed requirements", _record(failed_requirements=[], requirements_passed=True)),
+    (
+        "requirements passed with no failed requirement",
+        _record(failed_requirements=[], requirements_passed=True),
+    ),
+    ("requirements failed with one failed requirement", _record()),
+    (
+        "no requirement verdict keys",
+        {
+            key: value
+            for key, value in FULL_RECORD.items()
+            if key not in ("requirements_passed", "failed_requirements")
+        },
+    ),
     ("sha-256 base commit", _record(base_commit="d" * 64)),
     ("request cases", _record(cases_source="request")),
     ("integer scores", _record(baseline_score=0, final_score=1)),
