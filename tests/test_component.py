@@ -597,6 +597,41 @@ def test_input_must_hold_only_json_values(tmp_path, value, message):
     assert not marker.exists()
 
 
+@pytest.mark.parametrize(
+    ("kind", "returned", "key"),
+    [
+        ("run", "{1: 'a'}", "1"),
+        ("metric", "{'score': 1.0, 'scores': [{'name': 'a', 'score': 1.0}, {1: 'b'}]}", "1"),
+        ("run", "{'a': {True: 1}}", "True"),
+        ("metric", "{'score': 1.0, None: 2}", "None"),
+        ("run", "{1: 'a', '1': 'b'}", "1"),
+    ],
+)
+def test_function_result_needs_string_keys(tmp_path, kind, returned, key):
+    """A returned dict key that is not a string is refused, not turned into a string."""
+    script(tmp_path, f"def go(*args, **kwargs):\n    return {returned}\n")
+    call = call_run if kind == "run" else call_metric
+    value = 1 if kind == "run" else CASE
+    with pytest.raises(ExitCodeError) as caught:
+        call("component.py:go", value, timeout_s=10, cwd=tmp_path)
+    assert caught.value.exit_code == 2
+    assert f"the key {key}, which is not a string" in caught.value.stderr
+
+
+def test_cli_deeply_nested_input_is_a_usage_error(tmp_path, capsys):
+    """An input file nested too deep for the JSON parser is a usage error, not a traceback."""
+    marker = tmp_path / "started"
+    case = tmp_path / "case.json"
+    case.write_text("[" * 200000 + "]" * 200000)
+    with pytest.raises(SystemExit) as caught:
+        main(["score", "--entry", f"touch {marker}", "--input", str(case)])
+    assert caught.value.code == 2
+    err = capsys.readouterr().err
+    assert "cannot read the input file" in err
+    assert "Traceback" not in err
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("signature", ["output, /", "output, /, **kw"])
 def test_positional_only_parameter_is_refused(tmp_path, signature):
     """A positional-only parameter with no default cannot get its value by name."""

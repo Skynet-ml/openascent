@@ -51,7 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         score.error(str(error))
     try:
         payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
+    # A very deep nesting makes json.loads raise RecursionError, not ValueError.
+    except (OSError, ValueError, RecursionError) as error:
         score.error(f"cannot read the input file {args.input}: {error}")
     try:
         call = call_metric(entry, payload, timeout_s=args.timeout)

@@ -98,6 +98,7 @@ The child loads the file, calls the function, and writes the output file. The ti
 
 - In a run call, the child calls `function(input_value)` and writes `{"output": <return value>}`.
 - In a metric call, the child calls the function with the input fields that it names as parameters: `input`, `expected`, `output`, `elapsed_s`. A function with `**kwargs` gets every field. The child gives each value by name, so a positional-only parameter (before a `/`) with no default is an error with exit code 2. The return value is the metric answer object.
+- A dict in the return value must have string keys only. A key that is not a string is a `nonzero_exit` failure with exit code 2.
 - An exception in the function is a `nonzero_exit` failure. The traceback is in stderr.
 
 ## The `ascent score` command
