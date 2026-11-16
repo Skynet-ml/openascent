@@ -5,3 +5,6 @@ build/
 .venv/
 .pytest_cache/
 .ruff_cache/
+examples/rust/target/
+examples/go/metric
+examples/go/openascent-metric

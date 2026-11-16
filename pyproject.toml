@@ -4,18 +4,25 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openascent"
-version = "0.0.1"
-description = "Reference Python package of the OpenAscent standard for optimization runs (placeholder release)."
+version = "0.1.0"
+description = "Reference Python package of the OpenAscent standard: define a metric, the machine climbs it."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = []
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 3 - Alpha",
+    "Operating System :: POSIX",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+ascent = "openascent.cli:main"
 
 [project.urls]
 Repository = "https://github.com/Skynet-ml/openascent"
@@ -25,3 +32,13 @@ packages = ["openascent"]
 
 [tool.hatch.build.targets.sdist]
 include = ["openascent", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
