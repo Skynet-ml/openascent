@@ -7,7 +7,6 @@ thin Python form of those calls. It uses only the standard library.
 """
 
 import base64
-import mimetypes
 import os
 import urllib.error
 import urllib.parse
@@ -108,8 +107,9 @@ def llm(prompt: str, input: object = None, images: list | None = None) -> str:
         prompt: The system message when ``input`` is given, else the user message.
         input: The user message. A value that is not a string goes as its JSON text.
         images: Images for the user message. Each item is a URL string that
-            starts with ``http://``, ``https://`` or ``data:``, a ``Path`` of an
-            image file, or the ``bytes`` of a PNG, JPEG, GIF or WebP image.
+            starts with ``http://``, ``https://`` or ``data:``, a ``Path`` of a
+            PNG, JPEG, GIF or WebP file, or the ``bytes`` of such an image. The
+            helper reads the type of a file from its bytes, not from its name.
 
     Returns:
         The text at ``choices[0].message.content`` of the answer.
@@ -117,8 +117,10 @@ def llm(prompt: str, input: object = None, images: list | None = None) -> str:
     Raises:
         ValueError: The prompt is not a non-empty string, the input is not
             strict JSON, or an image is not valid. No request is sent.
-        HelperError: The contract has no judge model, the endpoint gave an
-            error answer, the answer has no text, or the connection failed.
+        HelperError: The contract has no judge model, ``ASCENT_MODEL_KEY``
+            holds a character outside visible ASCII (no request is sent), the
+            endpoint gave an error answer, the answer has no text, or the
+            connection failed.
     """
     if not isinstance(prompt, str) or not prompt:
         raise ValueError("The prompt must be a non-empty string.")
@@ -142,6 +144,13 @@ def llm(prompt: str, input: object = None, images: list | None = None) -> str:
             "The contract gives the metric no judge model."
         )
     key = os.environ.get("ASCENT_MODEL_KEY")
+    # http.client puts a bad header value in its error text, so a check after
+    # the request would show the key.
+    if key and not all("!" <= char <= "~" for char in key):
+        raise HelperError(
+            "The variable ASCENT_MODEL_KEY holds a character outside visible ASCII, "
+            "for example a line end or a space. Remove the character from the key."
+        )
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     body = _input_bytes({"model": model, "messages": messages})
     what = "The model endpoint"
@@ -188,14 +197,15 @@ def _image_url(image: object) -> str:
     """Turn one image item into the URL of an ``image_url`` part.
 
     Args:
-        image: A URL string, a ``Path`` of an image file, or image bytes.
+        image: A URL string, a ``Path`` of a PNG, JPEG, GIF or WebP file, or
+            the bytes of such an image. The type comes from the bytes.
 
     Returns:
         The URL as is, or a base64 data URL.
 
     Raises:
         ValueError: The item is not one of the three forms, the file cannot be
-            read, or the media type is not an image type.
+            read, or the bytes are not a PNG, JPEG, GIF or WebP image.
     """
     if isinstance(image, str):
         if image.startswith(("http://", "https://", "data:")):
@@ -205,18 +215,16 @@ def _image_url(image: object) -> str:
             "Give a file as a pathlib.Path."
         )
     if isinstance(image, Path):
-        media_type = mimetypes.guess_type(image.name)[0] or ""
-        if not media_type.startswith("image/"):
-            raise ValueError(f"The file {image} does not have the name of an image file.")
         try:
             data = image.read_bytes()
         except OSError as error:
             raise ValueError(f"The image file {image} cannot be read ({error.strerror}).") from None
+        media_type = _image_type(data)
+        if not media_type:
+            raise ValueError(f"The file {image} is not a PNG, JPEG, GIF or WebP image.")
     elif isinstance(image, bytes):
         data = image
-        media_type = next((t for sig, t in _IMAGE_SIGNATURES if data.startswith(sig)), "")
-        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-            media_type = "image/webp"
+        media_type = _image_type(data)
         if not media_type:
             raise ValueError("The image bytes are not a PNG, JPEG, GIF or WebP image.")
     else:
@@ -224,6 +232,20 @@ def _image_url(image: object) -> str:
             "An image must be a URL string, a pathlib.Path of an image file, or image bytes."
         )
     return f"data:{media_type};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _image_type(data: bytes) -> str:
+    """Find the media type of image bytes from their signature.
+
+    Args:
+        data: The image bytes.
+
+    Returns:
+        The media type of a PNG, JPEG, GIF or WebP image, else an empty string.
+    """
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return next((t for sig, t in _IMAGE_SIGNATURES if data.startswith(sig)), "")
 
 
 def _post(

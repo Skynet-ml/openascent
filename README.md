@@ -163,7 +163,7 @@ The answer is JSON. A metric in any language needs no library to call a helper.
 | `ASCENT_STAGE_<NAME>_URL` | The URL of the stage `<name>`. One variable for each stage. |
 | `ASCENT_MODEL_URL` | The base URL of the judge model endpoint. |
 | `ASCENT_MODEL` | The name of the judge model. |
-| `ASCENT_MODEL_KEY` | The key of the judge model. Empty or absent when the runner adds the key itself. |
+| `ASCENT_MODEL_KEY` | The key of the judge model. Empty or absent when the runner adds the key itself. The key holds only visible ASCII characters, with no space or line end. |
 | `ASCENT_LOG_URL` | The URL of the log. |
 
 A helper variable is absent when the contract gives the metric no such helper.
@@ -227,7 +227,7 @@ def score(input, output):
 ```
 
 - `call(stage, input=None)` returns the output of the stage. It raises `StageError` on a failure.
-- `llm(prompt, input=None, images=None)` returns the text of the answer. With `input`, `prompt` is the system message and `input` is the user message. An `input` that is not a string goes as its JSON text. Each image is a URL string (`http://`, `https://` or `data:`), a `pathlib.Path` of an image file, or the bytes of a PNG, JPEG, GIF or WebP image.
+- `llm(prompt, input=None, images=None)` returns the text of the answer. With `input`, `prompt` is the system message and `input` is the user message. An `input` that is not a string goes as its JSON text. Each image is a URL string (`http://`, `https://` or `data:`), a `pathlib.Path` of a PNG, JPEG, GIF or WebP file, or the bytes of such an image. The helper reads the type of a file from its bytes, not from its name.
 - `log(event, /, **fields)` sends one event. A field can have any name, also `event`.
 - `llm` and `log` raise `HelperError` on a failure. `StageError` is a kind of `HelperError`. A bad argument raises `ValueError` before any request.
 - The helpers do not use the proxy settings of the environment, do not follow a redirect, and read at most 16 MiB of an answer.

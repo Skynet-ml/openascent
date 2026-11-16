@@ -360,6 +360,20 @@ def test_llm_authorization(server, monkeypatch, key, header):
     assert server.requests[0]["headers"].get("Authorization") == header
 
 
+@pytest.mark.parametrize(
+    # os.environ refuses a null byte, so other control characters stand for it.
+    "key",
+    ["sk-test\n", "sk-test\r\n", "sk test", "sk-test\t", "sk-tést", "sk-\x01test", "sk-test\x7f"],
+)
+def test_llm_bad_key(server, monkeypatch, key):
+    """A key with a character outside visible ASCII fails before any request, and hides the key."""
+    model_env(monkeypatch, server, key)
+    with pytest.raises(HelperError, match="ASCENT_MODEL_KEY") as caught:
+        llm("x")
+    assert "sk-" not in str(caught.value)
+    assert server.requests == []
+
+
 def test_llm_images(server, monkeypatch, tmp_path):
     """URL strings go as is; files and bytes go as base64 data URLs with their media type."""
     model_env(monkeypatch, server)
@@ -394,6 +408,32 @@ def test_llm_bad_images(server, monkeypatch, tmp_path):
             llm("Look.", images=[item])
     with pytest.raises(ValueError, match="list"):
         llm("Look.", images=PNG)
+    assert server.requests == []
+
+
+def test_llm_file_type_from_bytes(server, monkeypatch, tmp_path):
+    """The type of a file image comes from its bytes, not from its name."""
+    model_env(monkeypatch, server)
+    webp = tmp_path / "shot.webp"
+    webp.write_bytes(WEBP)
+    png = tmp_path / "picture.bin"
+    png.write_bytes(PNG)
+    llm("Look.", images=[webp, png])
+    (message,) = json.loads(server.requests[0]["body"])["messages"]
+    urls = [part["image_url"]["url"] for part in message["content"][1:]]
+    assert urls == [data_url("image/webp", WEBP), data_url("image/png", PNG)]
+
+
+@pytest.mark.parametrize("name", ["x.svg", "x.png"])
+def test_llm_file_not_image(server, monkeypatch, tmp_path, name):
+    """A file whose bytes are not a PNG, JPEG, GIF or WebP image fails before any request."""
+    model_env(monkeypatch, server)
+    path = tmp_path / name
+    path.write_bytes(b"not an image at all")
+    with pytest.raises(ValueError) as caught:
+        llm("Look.", images=[path])
+    assert str(path) in str(caught.value)
+    assert "PNG, JPEG, GIF or WebP" in str(caught.value)
     assert server.requests == []
 
 
