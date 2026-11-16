@@ -86,7 +86,7 @@ Each error type has a stable `code`:
 | `nonzero_exit` | The command exited with a code that is not 0. The error keeps the code and the tail of stderr. |
 | `no_output` | The command wrote no output file. |
 | `bad_output_file` | The output path is a symbolic link or a hard link, or not a regular file, the runner cannot open the file, or the file is larger than the size limit (1 MiB by default). The runner reads the output through the call directory that it made, so a command that swaps that directory cannot redirect the read. |
-| `invalid_json` | The output file is not strict JSON: not UTF-8, a `NaN` or `Infinity` token, a float literal that overflows (`1e400`), an integer longer than 4300 digits, a duplicate key, or a lone surrogate escape such as `"\ud800"`. |
+| `invalid_json` | The output file is not strict JSON: not UTF-8, a `NaN` or `Infinity` token, a float literal that overflows (`1e400`), an integer longer than the digit limit of the Python interpreter (4300 digits by default), a duplicate key, or a lone surrogate escape such as `"\ud800"`. |
 | `invalid_form` | The output file is valid JSON but not the valid form, for example a metric result with no `score`, or a `score` that is an integer too large for a float. A large integer in a run output is valid. |
 
 ## The two entry forms
@@ -107,6 +107,8 @@ The child loads the file, calls the function, and writes the output file. The ti
 `ascent score --entry <entry> --input <file> [--timeout <seconds>]` runs one metric call in the current directory.
 It prints the checked answer as JSON on stdout and exits with code 0.
 On a failure it prints the error code and message on stderr and exits with code 1.
+On a usage error it prints the usage and a message on stderr and exits with code 2.
+A usage error is a bad argument, or an input file that the command cannot read, that is not JSON, or that is not a valid metric input.
 The default time limit is 60 seconds. The command needs no account and no network.
 
 `--entry` is `path/file.py:function`, or a command line that the command splits like a shell does.

@@ -178,8 +178,9 @@ def load_json(data: bytes) -> object:
     Raises:
         InvalidJsonError: The bytes are not UTF-8 or not JSON. Also: a NaN or
             Infinity token, a float literal that overflows (``1e400``), an
-            integer longer than Python's 4300-digit limit, a duplicate key, or
-            a string or key with a lone surrogate escape (``"\\ud800"``).
+            integer longer than the digit limit of the interpreter (4300
+            digits by default), a duplicate key, or a string or key with a
+            lone surrogate escape (``"\\ud800"``).
             A large integer within the digit limit parses; the form check
             decides if it fits.
     """

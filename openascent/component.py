@@ -459,7 +459,8 @@ def _run(argv, cwd, env, out, err, timeout_s: float) -> tuple[int | None, float]
     except (OSError, ValueError) as error:
         raise StartError(
             f"The command cannot start: {error}. Check that the command exists, "
-            "that it is executable, and that the working directory exists."
+            "that it is executable, that the working directory exists, and that "
+            "each environment name and value is valid."
         ) from None
     try:
         exit_code = process.wait(timeout=timeout_s)

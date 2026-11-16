@@ -1,5 +1,7 @@
 """Tests of the result forms and the strict JSON loader."""
 
+import sys
+
 import pytest
 
 from openascent.result import (
@@ -173,6 +175,15 @@ def test_to_dict_omits_absent_keys():
     }
 
 
+@pytest.fixture
+def default_digit_limit():
+    """Set the digit limit of the interpreter to its default of 4300 for one test."""
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    yield
+    sys.set_int_max_str_digits(limit)
+
+
 # The codes for a large number, pinned: the loader refuses a float
 # literal that overflows and an integer past Python's digit limit; the metric
 # form refuses a large integer score; a run output keeps a large integer.
@@ -184,6 +195,8 @@ LARGE_NUMBERS = [
 ]
 
 
+# The integer limit follows the interpreter, so the test sets the default.
+@pytest.mark.usefixtures("default_digit_limit")
 @pytest.mark.parametrize(("data", "check", "error"), LARGE_NUMBERS)
 def test_large_numbers(data, check, error):
     """Each kind of large number gives its pinned result."""

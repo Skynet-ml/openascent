@@ -222,6 +222,12 @@ def test_cannot_start(tmp_path):
         call_run([str(plain)], 1, timeout_s=10)
 
 
+def test_cannot_start_with_bad_environment():
+    """An environment name that the OS refuses is a start error that names the environment."""
+    with pytest.raises(StartError, match="each environment name and value is valid"):
+        call_run(["true"], 1, timeout_s=10, env={"A=B": "x"})
+
+
 def test_time_limit_kills_the_process_group(tmp_path):
     """After the time limit, the command and its children are gone."""
     pid_file = tmp_path / "pid"
