@@ -80,7 +80,7 @@ Each error type has a stable `code`:
 
 | Code | Cause |
 | --- | --- |
-| `start_failed` | The command cannot start: it is not found or not executable. |
+| `start_failed` | The command cannot start, for example it is not found or not executable, or the working directory or the environment is not valid. |
 | `time_limit` | The command ran longer than the time limit. The runner kills its whole process group. A process that leaves the group (for example with `setsid`) is not stopped; that needs an OS sandbox. |
 | `nonzero_exit` | The command exited with a code that is not 0. The error keeps the code and the tail of stderr. |
 | `no_output` | The command wrote no output file. |

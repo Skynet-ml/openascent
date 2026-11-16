@@ -3,7 +3,8 @@
 The package starts this file by its path with ``sys.executable``:
 ``python _child.py run|metric <file.py> <function>``. The file imports nothing
 from the package, so it works when the package is not installed in the
-child's environment. It does no result checking; the parent checks.
+child's environment. It checks only that every dict key in the result is a
+string; the parent checks the result form.
 """
 
 import importlib.util

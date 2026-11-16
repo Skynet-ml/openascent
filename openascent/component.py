@@ -173,8 +173,8 @@ def call_metric(
 
     Raises:
         ValueError: The time limit is not a finite number greater than 0, or the
-            payload has no ``input`` or no ``output`` key, or is not strict JSON
-            (see ``_input_bytes``).
+            payload has no ``input`` or no ``output`` key, has an ``elapsed_s``
+            that is not a number, or is not strict JSON (see ``_input_bytes``).
         AscentError: A subclass names the cause of the failure.
     """
     if not isinstance(payload, dict) or "input" not in payload or "output" not in payload:
@@ -182,6 +182,9 @@ def call_metric(
             "The metric input must be an object with the keys input and output, "
             "and optionally expected and elapsed_s."
         )
+    elapsed_s = payload.get("elapsed_s", 0)
+    if isinstance(elapsed_s, bool) or not isinstance(elapsed_s, int | float):
+        raise ValueError("The metric input key elapsed_s must be a number of seconds.")
     result, stdout, stderr, elapsed = _call(
         entry,
         "metric",
@@ -349,8 +352,10 @@ def _argv(entry: Entry, kind: str, cwd: str | os.PathLike | None) -> list[str]:
     """
     if isinstance(entry, tuple):
         return list(entry)
-    path = Path(cwd or os.getcwd()) / entry.path
-    if not path.is_file():
+    # The child runs inside cwd, so a relative path would resolve twice there.
+    path = (Path(cwd or os.getcwd()) / entry.path).absolute()
+    # os.path.isfile returns False on an OSError such as a name that is too long.
+    if not os.path.isfile(path):
         raise StartError(
             f"The function file {path} does not exist. Check the path before the colon."
         )

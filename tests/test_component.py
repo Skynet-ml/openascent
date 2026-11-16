@@ -656,6 +656,54 @@ def test_cli_deeply_nested_input_is_a_usage_error(tmp_path, capsys):
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("inner", [True, False])
+def test_function_entry_with_relative_cwd(tmp_path, monkeypatch, inner):
+    """A relative cwd joins the function path once, not twice in the child."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "sub" / "sub").mkdir(parents=True)
+    (tmp_path / "sub" / "m.py").write_text(
+        "def go(value):\n    return 'outer'\n\ndef score(output):\n    return {'score': 1.0}\n"
+    )
+    if inner:
+        (tmp_path / "sub" / "sub" / "m.py").write_text(
+            "def go(value):\n    return 'inner'\n\ndef score(output):\n    return {'score': 0.0}\n"
+        )
+    assert call_run("m.py:go", 1, timeout_s=10, cwd="sub").output == "outer"
+    assert call_metric("m.py:score", CASE, timeout_s=10, cwd="sub").result.score == 1.0
+
+
+def test_function_path_too_long_is_a_start_error(tmp_path, capsys):
+    """A function path that the OS refuses is a start failure, not an untyped OSError."""
+    entry = "a" * 300 + ".py:f"
+    with pytest.raises(StartError):
+        call_metric(entry, CASE, timeout_s=10, cwd=tmp_path)
+    case = tmp_path / "case.json"
+    case.write_text(json.dumps(CASE))
+    assert main(["score", "--entry", entry, "--input", str(case)]) == 1
+    err = capsys.readouterr().err
+    assert "ascent: start_failed:" in err
+    assert "Traceback" not in err
+
+
+@pytest.mark.parametrize("elapsed", ["soon", True, None, [1]])
+def test_elapsed_must_be_a_number(tmp_path, elapsed):
+    """An elapsed_s that is not a number is refused before any start."""
+    marker = tmp_path / "started"
+    with pytest.raises(ValueError, match="elapsed_s"):
+        call_metric(["sh", "-c", f"touch {marker}"], {**CASE, "elapsed_s": elapsed}, timeout_s=10)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("elapsed", [0, 1.5])
+def test_elapsed_number_is_accepted(tmp_path, elapsed):
+    """An int or float elapsed_s reaches the metric."""
+    script(tmp_path, "def score(elapsed_s):\n    return {'score': elapsed_s}\n")
+    payload = {**CASE, "elapsed_s": elapsed}
+    assert call_metric("component.py:score", payload, timeout_s=10, cwd=tmp_path).result.score == (
+        elapsed
+    )
+
+
 @pytest.mark.parametrize("signature", ["output, /", "output, /, **kw"])
 def test_positional_only_parameter_is_refused(tmp_path, signature):
     """A positional-only parameter with no default cannot get its value by name."""
