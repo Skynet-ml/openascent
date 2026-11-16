@@ -137,6 +137,9 @@ def llm(prompt: str, input: object = None, images: list | None = None) -> str:
         content = [{"type": "text", "text": text}]
         content += [{"type": "image_url", "image_url": {"url": _image_url(i)}} for i in images]
     messages.append({"role": "user", "content": content})
+    # The body check below runs after the variable checks. A bad string argument
+    # must be a ValueError with or without a judge model, as in call and log.
+    _input_bytes(messages)
     base = os.environ.get("ASCENT_MODEL_URL")
     model = os.environ.get("ASCENT_MODEL")
     if not base or not model:

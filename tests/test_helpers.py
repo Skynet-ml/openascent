@@ -463,6 +463,20 @@ def test_llm_bad_arguments(server, monkeypatch, prompt, value):
     assert server.requests == []
 
 
+@pytest.mark.parametrize(
+    ("prompt", "value", "images"),
+    [("\ud800", None, None), ("x", "\ud800", None), ("x", None, ["http://\ud800"])],
+)
+@pytest.mark.parametrize("key", [None, "sk test"])
+def test_llm_bad_string_argument_comes_first(server, monkeypatch, prompt, value, images, key):
+    """A lone surrogate in a string argument is a ValueError, also with no model or a bad key."""
+    if key is not None:
+        model_env(monkeypatch, server, key)
+    with pytest.raises(ValueError, match="lone surrogate"):
+        llm(prompt, value, images)
+    assert server.requests == []
+
+
 @pytest.mark.parametrize("absent", ["ASCENT_MODEL_URL", "ASCENT_MODEL"])
 @pytest.mark.parametrize("empty", [True, False])
 def test_llm_no_model(server, monkeypatch, absent, empty):
