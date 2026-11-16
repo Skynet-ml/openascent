@@ -323,8 +323,8 @@ Each file gives one part: `<path>\0<length>\0<hash>`.
 The parts are in sorted path order: the order of the paths as UTF-8 bytes.
 The parts join with no byte between them. Each part ends with exactly 64 hex characters, so the join has only one meaning.
 `metric_sha256` is the hash of the joined parts. There is no special first part and no fixed path.
-Metric code that comes in the run request counts as one file. Its path is the file in the metric entry:
-the `path/file.py` part of `path/file.py:function`, or the program of a command, for example `metric.sh` for `["./metric.sh"]`.
+Metric code that comes in the run request counts as one file.
+Its path is the path where the runner puts the file for the metric box, relative to the repository root.
 
 Run this in the repository root, with the path of each metric file:
 
@@ -342,6 +342,7 @@ python3 -c 'import hashlib,sys; h=lambda b: hashlib.sha256(b).hexdigest(); print
 
 - `request`: the cases came with the run request. The hash is of the compact JSON text of the cases, with sorted keys, in UTF-8.
   In Python: `json.dumps(cases, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")`.
+  This Python expression defines the text, also the form of each number.
   For the cases in `cases.json`:
 
   ```sh
@@ -365,8 +366,10 @@ shasum -a 256 change.patch
 
 1. Get the commit `base_commit`: `git checkout <base_commit>`.
 2. Compute `contract_sha256`, `metric_sha256` and `cases_sha256`. Compare each one with the record.
-3. Get the patch, compute its hash, and compare it with `change_sha256`. Apply the patch: `git apply change.patch`.
-4. Run the metric on the held-out cases (the positions in `split.held_out`).
+3. Get the patch from the run result. Compute its hash, and compare it with `change_sha256`. Apply the patch: `git apply change.patch`.
+4. Run the metric on the cases that give the final score.
+   The standard does not fix these cases, or how the case scores combine into one score. The documentation of the runner says both.
+   Skynet, for example, uses the mean of the scores of the held-out cases (the positions in `split.held_out`).
 5. Compare the score with `final_score`.
 
 ### The schema
