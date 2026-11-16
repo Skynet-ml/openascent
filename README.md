@@ -243,6 +243,145 @@ curl -sS -X POST "$ASCENT_STAGE_FACT_FINDER_URL" \
 
 It prints the answer, for example `{"output": ["Paris"]}`.
 
+## The run record
+
+A runner returns one JSON object with the run result: the run record.
+The runner also puts the record in the pull request text as a JSON block.
+There is no record file in the repository.
+A reader uses the record to check a score by hand.
+
+```json
+{
+  "record_version": 1,
+  "contract_sha256": "a7bee4c6b7495cdbb4cd70b2524931ae6c17305eecf855a812c4949ec1431a98",
+  "metric_sha256": "4cb4243c16a70758b85e0c463763a1ef6048098b3e14496fb85f45067334e0eb",
+  "metric_source": "repository",
+  "cases_sha256": null,
+  "cases_source": null,
+  "base_commit": "0123456789abcdef0123456789abcdef01234567",
+  "change_sha256": "18b48432344deb00d1f9ee5a1d55457a1479f62539deecbb79989aa70edf2dc7",
+  "baseline_score": 0.3,
+  "final_score": 0.9,
+  "seed": 7,
+  "split": null,
+  "image": null,
+  "contract_met": true,
+  "target_reached": true
+}
+```
+
+### The keys
+
+The record is a closed object. An unknown key is an error. All keys are required, except the three verdict keys.
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `record_version` | the integer `1` | The version of the record format. |
+| `contract_sha256` | SHA-256 hex | The hash of the bytes of the contract file `ascent.toml`. |
+| `metric_sha256` | SHA-256 hex | The hash of the metric files (see the rule below). |
+| `metric_source` | `"repository"` or `"request"` | Where the metric files come from. |
+| `cases_sha256` | SHA-256 hex or `null` | The hash of the cases. `null` when the run has no cases. |
+| `cases_source` | `"file"`, `"request"` or `null` | Where the cases come from. `null` exactly when `cases_sha256` is `null`. |
+| `base_commit` | full commit SHA | The commit of the repository before the change: 40 lowercase hex characters, or 64 in a SHA-256 repository. |
+| `change_sha256` | SHA-256 hex or `null` | The hash of the patch text as UTF-8 bytes. `null` when the patch is empty. |
+| `baseline_score` | number or `null` | The score before the change. |
+| `final_score` | number or `null` | The score after the change. |
+| `seed` | integer or `null` | The seed of the run. |
+| `split` | object or `null` | How the run split the cases (see below). |
+| `image` | string or `null` | The container image that the run used. |
+| `contract_met` | boolean | `true` when the result meets the contract. |
+| `target_reached` | boolean | Verdict key. `true` when the final score reaches the target. Present only when the contract has a target. |
+| `requirements_passed` | boolean | Verdict key. `true` when every requirement passed. Present only when the contract has requirements. |
+| `failed_requirements` | array | Verdict key. The requirements that failed. Present only when the contract has requirements. |
+
+A SHA-256 hex value is exactly 64 lowercase hex characters. `true` and `false` are not numbers.
+
+The `split` object is closed. It has exactly these keys:
+
+- `rule`: the name of the split rule, a string that is not empty. Skynet uses `pairs` and `single`. Another runner can use its own name.
+- `seed`: the seed of the split, an integer or `null`.
+- `search`, `validation`, `held_out`: the positions of the cases in each part, arrays of integers that are 0 or more. Position 0 is the first case.
+
+Each entry in `failed_requirements` is a closed object with exactly these keys:
+`name` (string), `direction` (`"maximize"` or `"minimize"`), `limit` (number), `value` (number or `null`), `reason` (string).
+
+### The hashes
+
+Each hash is a SHA-256 value in lowercase hex.
+
+`contract_sha256` is the hash of the bytes of `ascent.toml` at `base_commit`:
+
+```sh
+git show <base_commit>:ascent.toml | shasum -a 256
+```
+
+`metric_sha256` is the hash of the files that the metric box gets.
+Each file gives one part: `<path>\0<length>\0<hash>`.
+`<path>` is the path of the file in UTF-8, relative to the repository root, with `/` between folders.
+`<length>` is the byte length of the file in decimal. `<hash>` is the SHA-256 hex of the file bytes.
+`\0` is one zero byte.
+The parts are in sorted path order: the order of the paths as UTF-8 bytes.
+The parts join with no byte between them. Each part ends with exactly 64 hex characters, so the join has only one meaning.
+`metric_sha256` is the hash of the joined parts. There is no special first part and no fixed path.
+Metric code that comes in the run request counts as one file. Its path is the file in the metric entry:
+the `path/file.py` part of `path/file.py:function`, or the program of a command, for example `metric.sh` for `["./metric.sh"]`.
+
+Run this in the repository root, with the path of each metric file:
+
+```sh
+python3 -c 'import hashlib,sys; h=lambda b: hashlib.sha256(b).hexdigest(); print(h(b"".join(p+b"\0"+str(len(d)).encode()+b"\0"+h(d).encode() for p in sorted(a.encode() for a in sys.argv[1:]) for d in [open(p,"rb").read()])))' metric.py lib/util.py
+```
+
+`cases_sha256` depends on `cases_source`:
+
+- `file`: the hash of the bytes of the cases file.
+
+  ```sh
+  shasum -a 256 cases.jsonl
+  ```
+
+- `request`: the cases came with the run request. The hash is of the compact JSON text of the cases, with sorted keys, in UTF-8.
+  In Python: `json.dumps(cases, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")`.
+  For the cases in `cases.json`:
+
+  ```sh
+  python3 -c 'import hashlib,json,sys; print(hashlib.sha256(json.dumps(json.load(sys.stdin), sort_keys=True, separators=(",",":"), ensure_ascii=False).encode("utf-8")).hexdigest())' < cases.json
+  ```
+
+- `null`: the run has no cases.
+
+`change_sha256` is the hash of the patch text as UTF-8 bytes. For the patch in `change.patch`:
+
+```sh
+shasum -a 256 change.patch
+```
+
+### The metric source
+
+- `repository`: the metric files are in the repository at `base_commit`. A checker computes `metric_sha256` from that commit.
+- `request`: the metric code came with the run request. The checker gets the code from the person who ran the run. The hash proves that the code is the same.
+
+### Check a score
+
+1. Get the commit `base_commit`: `git checkout <base_commit>`.
+2. Compute `contract_sha256`, `metric_sha256` and `cases_sha256`. Compare each one with the record.
+3. Get the patch, compute its hash, and compare it with `change_sha256`. Apply the patch: `git apply change.patch`.
+4. Run the metric on the held-out cases (the positions in `split.held_out`).
+5. Compare the score with `final_score`.
+
+### The schema
+
+The JSON Schema (draft 2020-12) of the record is in the package: `openascent/record.schema.json`. Load it like this:
+
+```python
+import json
+from importlib.resources import files
+
+schema = json.loads((files("openascent") / "record.schema.json").read_text(encoding="utf-8"))
+```
+
+The package does not validate records. It has no dependency for that. Use a JSON Schema validator, for example `jsonschema`.
+
 ## Install
 
 Install from the repository, at a release tag:

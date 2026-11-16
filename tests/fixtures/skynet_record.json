@@ -1,0 +1,17 @@
+{
+  "record_version": 1,
+  "base_commit": "cccccccccccccccccccccccccccccccccccccccc",
+  "change_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+  "baseline_score": 0.30000000000000004,
+  "final_score": 0.9,
+  "contract_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "metric_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "metric_source": "repository",
+  "cases_sha256": null,
+  "cases_source": null,
+  "seed": 7,
+  "split": null,
+  "image": "registry.example/sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "target_reached": true,
+  "contract_met": true
+}
