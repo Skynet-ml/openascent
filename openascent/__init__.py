@@ -14,6 +14,7 @@ from .component import (
     call_run,
     parse_entry,
 )
+from .helpers import HelperError, StageError, call, llm, log
 from .result import (
     AscentError,
     ExitCodeError,
@@ -37,6 +38,7 @@ __all__ = [
     "AscentError",
     "ExitCodeError",
     "FunctionEntry",
+    "HelperError",
     "InvalidFormError",
     "InvalidJsonError",
     "MetricCall",
@@ -45,13 +47,17 @@ __all__ = [
     "NoOutputError",
     "OutputFileError",
     "RunCall",
+    "StageError",
     "StartError",
     "TimeLimitError",
     "__version__",
+    "call",
     "call_metric",
     "call_run",
     "check_metric_result",
     "check_run_output",
+    "llm",
     "load_json",
+    "log",
     "parse_entry",
 ]

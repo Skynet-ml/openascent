@@ -151,6 +151,97 @@ The contract key `[metric] direction` tells the runner which way is better: `"ma
 The default is `"maximize"`. The result of a metric is one finite number with no direction in it.
 The contract file is `ascent.toml`. This package does not parse `ascent.toml` yet.
 
+## Helper calls
+
+A metric can call helpers: the stages of the run, a judge model, and a log.
+The runner gives each helper to the metric as a local URL in an environment variable.
+Each call is one HTTP POST with a UTF-8 JSON body and the header `Content-Type: application/json`.
+The answer is JSON. A metric in any language needs no library to call a helper.
+
+| Variable | Helper |
+| --- | --- |
+| `ASCENT_STAGE_<NAME>_URL` | The URL of the stage `<name>`. One variable for each stage. |
+| `ASCENT_MODEL_URL` | The base URL of the judge model endpoint. |
+| `ASCENT_MODEL` | The name of the judge model. |
+| `ASCENT_MODEL_KEY` | The key of the judge model. Empty or absent when the runner adds the key itself. |
+| `ASCENT_LOG_URL` | The URL of the log. |
+
+A helper variable is absent when the contract gives the metric no such helper.
+A helper call has no time limit of its own. The time limit of the metric call bounds the wait.
+
+### The name rule
+
+`<NAME>` comes from the stage name. Each ASCII letter becomes upper case. Each ASCII digit stays.
+Each other character becomes `_`.
+
+| Stage | Variable |
+| --- | --- |
+| `planner` | `ASCENT_STAGE_PLANNER_URL` |
+| `planner-v2` | `ASCENT_STAGE_PLANNER_V2_URL` |
+| `Judge.Final` | `ASCENT_STAGE_JUDGE_FINAL_URL` |
+
+### Stage call
+
+POST to `ASCENT_STAGE_<NAME>_URL` with the body `{"input": <the stage input>}`.
+A success answer has a 2xx status and the body `{"output": <the stage output>}`.
+
+### Model call
+
+POST to `<ASCENT_MODEL_URL>/chat/completions` in the OpenAI chat form, with `model` (the value of `ASCENT_MODEL`) and `messages`.
+Send the header `Authorization: Bearer <key>` only when `ASCENT_MODEL_KEY` is not empty.
+The text of the answer is at `choices[0].message.content`.
+
+### Log event
+
+POST to `ASCENT_LOG_URL` with one event as the body `{"event": "<name>", "fields": {"<name>": <JSON value>, ...}}`.
+A success answer has any 2xx status. The body of the answer is not used.
+
+### The error answer
+
+Each helper gives the same error answer: a status code that is not 2xx and the body `{"error": "<text>"}`.
+The runner gives an error answer to a stage call in these four failures:
+
+- The stage is not in the run (an unknown stage).
+- The stage failed.
+- The stage gave no valid output.
+- The stage passed its time limit.
+
+The standard fixes no status code for each failure. The `error` text says which failure occurred.
+
+### The Python helpers
+
+```python
+from openascent import StageError, call, llm, log
+
+
+def score(input, output):
+    try:
+        facts = call("fact-finder", input)
+    except StageError as error:
+        return {"score": 0.0, "feedback": f"No facts: {error}"}
+    verdict = llm(
+        "Answer yes or no: does the text hold the facts?", {"facts": facts, "text": output}
+    )
+    log("judge", verdict=verdict)
+    return {"score": 1.0 if verdict.strip().lower().startswith("yes") else 0.0}
+```
+
+- `call(stage, input=None)` returns the output of the stage. It raises `StageError` on a failure.
+- `llm(prompt, input=None, images=None)` returns the text of the answer. With `input`, `prompt` is the system message and `input` is the user message. An `input` that is not a string goes as its JSON text. Each image is a URL string (`http://`, `https://` or `data:`), a `pathlib.Path` of an image file, or the bytes of a PNG, JPEG, GIF or WebP image.
+- `log(event, **fields)` sends one event.
+- `llm` and `log` raise `HelperError` on a failure. `StageError` is a kind of `HelperError`. A bad argument raises `ValueError` before any request.
+- The helpers do not use the proxy settings of the environment, do not follow a redirect, and read at most 16 MiB of an answer.
+
+### A stage call with curl
+
+```sh
+curl -sS -X POST "$ASCENT_STAGE_FACT_FINDER_URL" \
+  -H 'Content-Type: application/json' \
+  -d '{"input": "The capital of France"}'
+```
+
+It prints the answer, for example `{"output": ["Paris"]}`.
+
 ## Install
 
 Install from the repository, at a release tag:
