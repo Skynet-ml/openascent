@@ -246,7 +246,7 @@ It prints the answer, for example `{"output": ["Paris"]}`.
 ## The run record
 
 A runner returns one JSON object with the run result: the run record.
-The runner also puts the record in the pull request text as a JSON block.
+When the run opens a pull request, the runner also puts the record in the text of that pull request as a JSON block.
 There is no record file in the repository.
 A reader uses the record to check a score by hand.
 
@@ -283,7 +283,7 @@ The record is a closed object. An unknown key is an error. All keys are required
 | `cases_sha256` | SHA-256 hex or `null` | The hash of the cases. `null` when the run has no cases. |
 | `cases_source` | `"file"`, `"request"` or `null` | Where the cases come from. `null` exactly when `cases_sha256` is `null`. |
 | `base_commit` | full commit SHA | The commit of the repository before the change: 40 lowercase hex characters, or 64 in a SHA-256 repository. |
-| `change_sha256` | SHA-256 hex or `null` | The hash of the patch text as UTF-8 bytes. `null` when the patch is empty. |
+| `change_sha256` | SHA-256 hex or `null` | The hash of the patch text as UTF-8 bytes. `null` when the patch is empty: the hash of zero bytes is not valid here. |
 | `baseline_score` | number or `null` | The score before the change. |
 | `final_score` | number or `null` | The score after the change. |
 | `seed` | integer or `null` | The seed of the run. |
@@ -312,11 +312,18 @@ Each entry in `failed_requirements` is a closed object with exactly these keys:
 
 Each hash is a SHA-256 value in lowercase hex.
 
-`contract_sha256` is the hash of the bytes of `ascent.toml` at `base_commit`:
+A file hash is the hash of the bytes of the file on disk, where the runner read the file.
+For a file of the repository, these are the bytes in a checkout of `base_commit`.
+Usually they are the bytes that git stores. A checkout filter can make them different: a line-end rule in `.gitattributes`, or Git LFS.
+Then the checker must make its checkout with the same filters as the runner. The documentation of the runner names them.
+
+This command gives the hash of one file, here of `ascent.toml`:
 
 ```sh
-git show <base_commit>:ascent.toml | shasum -a 256
+python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())' < ascent.toml
 ```
+
+`contract_sha256` is the hash of the file `ascent.toml`.
 
 `metric_sha256` is the hash of the metric files: the files that the runner puts where it runs the metric.
 The standard does not fix this set of files. The documentation of the runner names it.
@@ -340,10 +347,7 @@ python3 -c 'import hashlib,os,sys; h=lambda b: hashlib.sha256(b).hexdigest(); pr
 
 - `file`: the cases are one file in the repository at `base_commit`. The hash is of the bytes of that file.
   The documentation of the runner says which file it is.
-
-  ```sh
-  shasum -a 256 cases.jsonl
-  ```
+  For the file `cases.jsonl`, use the command for one file with `< cases.jsonl` at its end.
 
 - `request`: the cases came with the run request. The checker gets the cases from the person who ran the run.
   The hash proves that the cases are the same.
@@ -358,15 +362,12 @@ python3 -c 'import hashlib,os,sys; h=lambda b: hashlib.sha256(b).hexdigest(); pr
 
 - `null`: the run has no cases.
 
-`change_sha256` is the hash of the patch text as UTF-8 bytes. For the patch in `change.patch`:
-
-```sh
-shasum -a 256 change.patch
-```
+`change_sha256` is the hash of the patch text as UTF-8 bytes.
+For the patch in `change.patch`, use the command for one file with `< change.patch` at its end.
 
 ### The metric source
 
-- `repository`: the metric files are in the repository at `base_commit`. A checker computes `metric_sha256` from that commit.
+- `repository`: the metric files are in the repository at `base_commit`. A checker computes `metric_sha256` from a checkout of that commit.
 - `request`: the metric code came with the run request. The checker gets the code from the person who ran the run. The hash proves that the code is the same.
 
 ### Check a score
@@ -376,6 +377,9 @@ shasum -a 256 change.patch
    When `cases_sha256` is `null`, the run has no cases, and there is no cases hash to compare.
 3. Get the patch text from the run result. The documentation of the runner says where the result holds it.
    Compute its hash, and compare it with `change_sha256`. Apply the patch: `git apply change.patch`.
+   Then compute the hashes of step 2 again. Each hash must be the same as before the patch.
+   A different hash shows that the patch changed the contract, a metric file or the cases file.
+   Then the record does not prove the score: stop.
    When `change_sha256` is `null`, the run made no change: skip this step.
 4. Run the metric on the cases that give the final score.
    For each case, get the output of the changed program for the case (see "Run call").

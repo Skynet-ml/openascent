@@ -51,8 +51,16 @@
       "anyOf": [{"$ref": "#/$defs/sha1"}, {"$ref": "#/$defs/sha256"}]
     },
     "change_sha256": {
-      "description": "SHA-256 of the patch text as UTF-8 bytes. Null when the patch is empty.",
-      "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+      "description": "SHA-256 of the patch text as UTF-8 bytes. Null when the patch is empty: the hash of zero bytes is not valid here.",
+      "anyOf": [
+        {
+          "allOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"not": {"const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}
+          ]
+        },
+        {"type": "null"}
+      ]
     },
     "baseline_score": {
       "description": "The score of the program before the change.",

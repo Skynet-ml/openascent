@@ -28,6 +28,7 @@ METRIC_FILES = {
 }
 PATCH = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-X = 1\n+X = 2\n"
 REQUEST_CASES = [{"input": "café", "expected": "CAFÉ"}, {"input": "b", "expected": 2}]
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 HEX_A = "a" * 64
 HEX_B = "b" * 64
@@ -190,6 +191,7 @@ INVALID = [
     ("hash of 64 hex and a newline", {"contract_sha256": "a" * 64 + "\n"}),
     ("hash of 63 hex and a newline", {"metric_sha256": "a" * 63 + "\n"}),
     ("hash not hex", {"change_sha256": "g" * 64}),
+    ("change hash of an empty patch", {"change_sha256": EMPTY_SHA256}),
     ("hash as number", {"contract_sha256": 1}),
     ("cases hash not hex", {"cases_sha256": "g" * 64}),
     ("base commit too short", {"base_commit": "d" * 39}),
@@ -286,6 +288,8 @@ VALID = [
     ),
     ("sha-256 base commit", _record(base_commit="d" * 64)),
     ("request cases", _record(cases_source="request")),
+    ("contract hash of an empty file", _record(contract_sha256=EMPTY_SHA256)),
+    ("cases hash of an empty file", _record(cases_sha256=EMPTY_SHA256)),
     ("integer scores", _record(baseline_score=0, final_score=1)),
     ("split with null seed and empty lists", _record(split=_split(seed=None, validation=[]))),
     ("custom split rule", _record(split=_split(rule="k-fold"))),
@@ -395,6 +399,27 @@ def test_metric_parts_form():
     assert _metric_parts(METRIC_FILES).startswith(first + b"metric.py\x00")
 
 
+@pytest.mark.parametrize(
+    ("name", "data"),
+    [("ascent.toml", CONTRACT), ("change.patch", PATCH.encode("utf-8")), ("cases.jsonl", b"")],
+    ids=["contract", "patch", "empty file"],
+)
+def test_readme_file_command(tmp_path, name, data):
+    """The file hash command in the README gives the hash of the bytes of the file."""
+    (tmp_path / name).write_bytes(data)
+    command = _readme_command("stdin.buffer.read")
+    assert command.endswith(" < ascent.toml")
+    command = command.removesuffix("ascent.toml") + name
+    assert _run_command(command, tmp_path) == _sha256(data)
+
+
+def test_readme_has_one_hash_tool():
+    """The run record section of the README uses python3 for each hash, not a tool of one system."""
+    section = _readme_section()
+    assert "shasum" not in section
+    assert "sha256sum" not in section
+
+
 def test_readme_metric_command(tmp_path):
     """The metric hash command in the README gives the hash of the joined parts."""
     for path, data in METRIC_FILES.items():
@@ -424,5 +449,5 @@ def test_readme_request_cases_command(tmp_path, env):
     cases_file = tmp_path / "cases.json"
     cases_file.write_text(json.dumps(REQUEST_CASES, ensure_ascii=False, indent=2), encoding="utf-8")
     text = '[{"expected":"CAFÉ","input":"café"},{"expected":2,"input":"b"}]'
-    command = _readme_command("sys.stdin")
+    command = _readme_command("json.load")
     assert _run_command(command, tmp_path, env) == _sha256(text.encode("utf-8"))
