@@ -117,10 +117,11 @@ def llm(prompt: str, input: object = None, images: list | None = None) -> str:
     Raises:
         ValueError: The prompt is not a non-empty string, the input is not
             strict JSON, or an image is not valid. No request is sent.
-        HelperError: The contract has no judge model, ``ASCENT_MODEL_KEY``
-            holds a character outside visible ASCII (no request is sent), the
-            endpoint gave an error answer, the answer has no text, or the
-            connection failed.
+        HelperError: The contract has no judge model, ``ASCENT_MODEL`` is
+            not UTF-8 text or ``ASCENT_MODEL_KEY`` holds a character outside
+            visible ASCII (no request is sent), the endpoint gave an error
+            answer, the answer is not valid or has no text, or the connection
+            failed.
     """
     if not isinstance(prompt, str) or not prompt:
         raise ValueError("The prompt must be a non-empty string.")
@@ -143,6 +144,13 @@ def llm(prompt: str, input: object = None, images: list | None = None) -> str:
             "The variable ASCENT_MODEL_URL or ASCENT_MODEL is absent or empty. "
             "The contract gives the metric no judge model."
         )
+    try:
+        model.encode("utf-8")
+    except UnicodeEncodeError:
+        raise HelperError(
+            "The variable ASCENT_MODEL holds a byte that is not UTF-8. "
+            "Give the model name as UTF-8 text."
+        ) from None
     key = os.environ.get("ASCENT_MODEL_KEY")
     # http.client puts a bad header value in its error text, so a check after
     # the request would show the key.
@@ -180,7 +188,8 @@ def log(event: str, /, **fields: object) -> None:
         ValueError: The event name is not a non-empty string, or the fields
             are not strict JSON. No request is sent.
         HelperError: The contract gives the metric no log, the runner gave an
-            error answer, or the connection failed.
+            error answer or an answer that is too large, or the connection
+            failed.
     """
     if not isinstance(event, str) or not event:
         raise ValueError("The event name must be a non-empty string.")
@@ -264,13 +273,14 @@ def _post(
         The body of the answer, at most ``MAX_ANSWER_BYTES``.
 
     Raises:
-        HelperError: The URL is not http or https, the answer is an error
-            answer or too large, or the connection failed. The type is ``error``.
+        HelperError: The URL is not valid or not http or https, the answer
+            is an error answer or too large, or the connection failed. The type
+            is ``error``.
     """
     try:
         scheme = urllib.parse.urlsplit(url).scheme
     except ValueError:
-        scheme = ""
+        raise error(f"{what} has the URL {url!r}, which is not a valid URL.") from None
     if scheme not in ("http", "https"):
         raise error(f"{what} has the URL {url!r}, which is not an http or https URL.")
     request = urllib.request.Request(

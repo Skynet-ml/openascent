@@ -241,6 +241,13 @@ def test_call_refuses_other_schemes(monkeypatch, url):
         call("a", 1)
 
 
+def test_call_refuses_url_that_is_not_valid(monkeypatch):
+    """A URL that cannot be split is a stage error that says so."""
+    monkeypatch.setenv("ASCENT_STAGE_A_URL", "http://[::1/x")
+    with pytest.raises(StageError, match="not a valid URL"):
+        call("a", 1)
+
+
 def test_call_answer_too_large(server, monkeypatch):
     """A 2xx answer over the size bound is a stage error."""
     monkeypatch.setenv("ASCENT_STAGE_A_URL", server.url)
@@ -358,6 +365,16 @@ def test_llm_authorization(server, monkeypatch, key, header):
     model_env(monkeypatch, server, key)
     llm("x")
     assert server.requests[0]["headers"].get("Authorization") == header
+
+
+def test_llm_model_name_not_utf8(server, monkeypatch):
+    """A model name that is not UTF-8 is a helper error that names the variable."""
+    model_env(monkeypatch, server)
+    # os.environ keeps a byte that is not UTF-8 as a lone surrogate.
+    monkeypatch.setenv("ASCENT_MODEL", "judge-\udcff")
+    with pytest.raises(HelperError, match="ASCENT_MODEL holds a byte that is not UTF-8"):
+        llm("x")
+    assert server.requests == []
 
 
 @pytest.mark.parametrize(
@@ -542,6 +559,14 @@ def test_log_error_answer(server, monkeypatch):
     monkeypatch.setenv("ASCENT_LOG_URL", server.url)
     reply(server, 400, {"error": "The event is too large."})
     with pytest.raises(HelperError, match=r"status 400: The event is too large\."):
+        log("x")
+
+
+def test_log_answer_too_large(server, monkeypatch):
+    """A 2xx answer over the size bound is a helper error, also for the log."""
+    monkeypatch.setenv("ASCENT_LOG_URL", server.url)
+    server.reply = (200, b" " * (MAX_ANSWER_BYTES + 1))
+    with pytest.raises(HelperError, match=f"larger than {MAX_ANSWER_BYTES} bytes"):
         log("x")
 
 

@@ -173,6 +173,7 @@ A helper call has no time limit of its own. The time limit of the metric call bo
 
 `<NAME>` comes from the stage name. Each ASCII letter becomes upper case. Each ASCII digit stays.
 Each other character becomes `_`.
+Two stage names that give the same `<NAME>` are not valid in one contract.
 
 | Stage | Variable |
 | --- | --- |
@@ -230,7 +231,7 @@ def score(input, output):
 - `llm(prompt, input=None, images=None)` returns the text of the answer. With `input`, `prompt` is the system message and `input` is the user message. An `input` that is not a string goes as its JSON text. Each image is a URL string (`http://`, `https://` or `data:`), a `pathlib.Path` of a PNG, JPEG, GIF or WebP file, or the bytes of such an image. The helper reads the type of a file from its bytes, not from its name.
 - `log(event, /, **fields)` sends one event. A field can have any name, also `event`.
 - `llm` and `log` raise `HelperError` on a failure. `StageError` is a kind of `HelperError`. A bad argument raises `ValueError` before any request.
-- The helpers do not use the proxy settings of the environment, do not follow a redirect, and read at most 16 MiB of an answer.
+- The helpers do not use the proxy settings of the environment, and do not follow a redirect. An answer larger than 16 MiB is a failure for each helper, also for `log`.
 
 ### A stage call with curl
 
