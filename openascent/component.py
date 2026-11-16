@@ -347,17 +347,19 @@ def _check_output_limit(limit: object) -> None:
         )
 
 
-def _input_bytes(payload: dict) -> bytes:
-    """Encode the input object as strict UTF-8 JSON.
+def _input_bytes(payload: object, what: str = "The input value") -> bytes:
+    """Encode a value as strict UTF-8 JSON.
 
     Args:
-        payload: The input object.
+        payload: The value, for example the input object of a call.
+        what: The subject of the error messages. It names the value for the
+            caller.
 
     Returns:
-        The content of the input file.
+        The JSON text as UTF-8 bytes.
 
     Raises:
-        ValueError: The object holds a value that JSON cannot hold (NaN,
+        ValueError: The value has a part that JSON cannot hold (NaN,
             infinity, a set, any other object), an object key that is not a
             string, or a string with a lone surrogate.
     """
@@ -365,7 +367,7 @@ def _input_bytes(payload: dict) -> bytes:
         text = json.dumps(payload, allow_nan=False, ensure_ascii=False)
     except (ValueError, TypeError, RecursionError) as error:
         raise ValueError(
-            f"The input value is not strict JSON ({error}). Use only finite numbers, "
+            f"{what} is not strict JSON ({error}). Use only finite numbers, "
             "strings, booleans, None, lists, and dicts with string keys."
         ) from None
     # json.dumps turns a key such as 1 into "1" in silence, and {1: "a", "1": "b"}
@@ -376,7 +378,7 @@ def _input_bytes(payload: dict) -> bytes:
         if isinstance(item, dict):
             if not all(isinstance(key, str) for key in item):
                 raise ValueError(
-                    "The input value holds an object key that is not a string. "
+                    f"{what} holds an object key that is not a string. "
                     "Use only string keys in dicts."
                 )
             pending.extend(item.values())
@@ -386,7 +388,7 @@ def _input_bytes(payload: dict) -> bytes:
         return text.encode("utf-8")
     except UnicodeEncodeError:
         raise ValueError(
-            "The input value holds a string with a lone surrogate, which is not "
+            f"{what} holds a string with a lone surrogate, which is not "
             "valid Unicode text. Use only valid Unicode strings."
         ) from None
 

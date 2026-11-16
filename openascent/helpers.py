@@ -125,11 +125,13 @@ def llm(prompt: str, input: object = None, images: list | None = None) -> str:
     """
     if not isinstance(prompt, str) or not prompt:
         raise ValueError("The prompt must be a non-empty string.")
+    _input_bytes(prompt, "The prompt")
     if input is None:
         messages, text = [], prompt
     else:
         messages = [{"role": "system", "content": prompt}]
-        text = input if isinstance(input, str) else _input_bytes(input).decode("utf-8")
+        data = _input_bytes(input)
+        text = input if isinstance(input, str) else data.decode("utf-8")
     content = text
     if images is not None:
         if not isinstance(images, list):
@@ -137,9 +139,6 @@ def llm(prompt: str, input: object = None, images: list | None = None) -> str:
         content = [{"type": "text", "text": text}]
         content += [{"type": "image_url", "image_url": {"url": _image_url(i)}} for i in images]
     messages.append({"role": "user", "content": content})
-    # The body check below runs after the variable checks. A bad string argument
-    # must be a ValueError with or without a judge model, as in call and log.
-    _input_bytes(messages)
     base = os.environ.get("ASCENT_MODEL_URL")
     model = os.environ.get("ASCENT_MODEL")
     if not base or not model:
@@ -196,6 +195,8 @@ def log(event: str, /, **fields: object) -> None:
     """
     if not isinstance(event, str) or not event:
         raise ValueError("The event name must be a non-empty string.")
+    _input_bytes(event, "The event name")
+    _input_bytes(fields, "The fields value")
     body = _input_bytes({"event": event, "fields": fields})
     url = os.environ.get("ASCENT_LOG_URL")
     if not url:
@@ -216,11 +217,13 @@ def _image_url(image: object) -> str:
         The URL as is, or a base64 data URL.
 
     Raises:
-        ValueError: The item is not one of the three forms, the file cannot be
-            read, or the bytes are not a PNG, JPEG, GIF or WebP image.
+        ValueError: The item is not one of the three forms, a URL holds a lone
+            surrogate, the file cannot be read, or the bytes are not a PNG,
+            JPEG, GIF or WebP image.
     """
     if isinstance(image, str):
         if image.startswith(("http://", "https://", "data:")):
+            _input_bytes(image, "An image URL")
             return image
         raise ValueError(
             "An image string must be a URL that starts with http://, https:// or data:. "

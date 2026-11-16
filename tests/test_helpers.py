@@ -464,15 +464,22 @@ def test_llm_bad_arguments(server, monkeypatch, prompt, value):
 
 
 @pytest.mark.parametrize(
-    ("prompt", "value", "images"),
-    [("\ud800", None, None), ("x", "\ud800", None), ("x", None, ["http://\ud800"])],
+    ("prompt", "value", "images", "subject"),
+    [
+        ("\ud800", None, None, "The prompt"),
+        ("\ud800", {"a": 1}, None, "The prompt"),
+        ("x", "\ud800", None, "The input value"),
+        ("x", None, ["http://\ud800"], "An image URL"),
+    ],
 )
 @pytest.mark.parametrize("key", [None, "sk test"])
-def test_llm_bad_string_argument_comes_first(server, monkeypatch, prompt, value, images, key):
-    """A lone surrogate in a string argument is a ValueError, also with no model or a bad key."""
+def test_llm_bad_string_argument_comes_first(
+    server, monkeypatch, prompt, value, images, subject, key
+):
+    """A lone surrogate is a ValueError that names its argument, also with no model or a bad key."""
     if key is not None:
         model_env(monkeypatch, server, key)
-    with pytest.raises(ValueError, match="lone surrogate"):
+    with pytest.raises(ValueError, match=f"^{subject} holds a string with a lone surrogate"):
         llm(prompt, value, images)
     assert server.requests == []
 
@@ -599,5 +606,24 @@ def test_log_bad_arguments(server, monkeypatch, event, fields):
     """A bad event name or fields that are not strict JSON fail before any request."""
     monkeypatch.setenv("ASCENT_LOG_URL", server.url)
     with pytest.raises(ValueError):
+        log(event, **fields)
+    assert server.requests == []
+
+
+@pytest.mark.parametrize(
+    ("event", "fields", "message"),
+    [
+        ("\ud800", {}, "The event name holds a string with a lone surrogate"),
+        ("x", {"v": "\ud800"}, "The fields value holds a string with a lone surrogate"),
+        ("x", {"\ud800": 1}, "The fields value holds a string with a lone surrogate"),
+        ("x", {"v": float("nan")}, "The fields value is not strict JSON"),
+    ],
+)
+@pytest.mark.parametrize("with_log", [False, True])
+def test_log_bad_argument_names_its_argument(server, monkeypatch, event, fields, message, with_log):
+    """A bad event name or field is a ValueError that names its argument, also with no log."""
+    if with_log:
+        monkeypatch.setenv("ASCENT_LOG_URL", server.url)
+    with pytest.raises(ValueError, match=f"^{message}"):
         log(event, **fields)
     assert server.requests == []
