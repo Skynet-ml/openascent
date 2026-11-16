@@ -1,8 +1,11 @@
-"""Tests of the run record schema and the hash rules in the README."""
+"""Tests of the run record schema, and of the example record and the hash commands in the README."""
 
 import copy
 import hashlib
 import json
+import os
+import subprocess
+import sys
 from importlib.resources import files
 from pathlib import Path
 
@@ -12,6 +15,19 @@ from jsonschema import Draft202012Validator
 SCHEMA = json.loads((files("openascent") / "record.schema.json").read_text(encoding="utf-8"))
 VALIDATOR = Draft202012Validator(SCHEMA)
 FIXTURES = Path(__file__).parent / "fixtures"
+README = Path(__file__).parent.parent / "README.md"
+
+# The example record in the README holds the hashes of these inputs.
+CONTRACT = b'[metric]\nentry = "metric.py:score"\n'
+METRIC_FILES = {
+    "metric.py": (
+        b"def score(output, expected=None):\n"
+        b'    return {"score": 1.0 if output == expected else 0.0}\n'
+    ),
+    "lib/util.py": b"X = 1\n",
+}
+PATCH = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-X = 1\n+X = 2\n"
+REQUEST_CASES = [{"input": "café", "expected": "CAFÉ"}, {"input": "b", "expected": 2}]
 
 HEX_A = "a" * 64
 HEX_B = "b" * 64
@@ -295,49 +311,87 @@ def _sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def test_contract_hash_rule():
-    """The contract hash is the SHA-256 of the file bytes."""
-    contract = b'[metric]\nentry = "metric.py:score"\n'
-    assert _sha256(contract) == "a7bee4c6b7495cdbb4cd70b2524931ae6c17305eecf855a812c4949ec1431a98"
+def _metric_parts(files):
+    """Join one part for each metric file, in sorted path order.
 
+    Args:
+        files: The bytes of each metric file, by its path.
 
-def test_metric_hash_rule():
-    """The metric hash follows the framed-parts rule in the README."""
-    metric_files = {
-        "metric.py": (
-            b"def score(output, expected=None):\n"
-            b'    return {"score": 1.0 if output == expected else 0.0}\n'
-        ),
-        "lib/util.py": b"X = 1\n",
-    }
+    Returns:
+        The joined parts. Their SHA-256 is the metric hash.
+    """
     # The 64-character hex end makes each part self-delimiting, so the parts join with no separator.
-    parts = b"".join(
+    return b"".join(
         path.encode("utf-8")
         + b"\0"
-        + str(len(metric_files[path])).encode()
+        + str(len(files[path])).encode()
         + b"\0"
-        + _sha256(metric_files[path]).encode()
-        for path in sorted(metric_files, key=lambda path: path.encode("utf-8"))
-    )
-    assert parts.startswith(b"lib/util.py\x006\x00")
-    assert _sha256(parts) == "4cb4243c16a70758b85e0c463763a1ef6048098b3e14496fb85f45067334e0eb"
-
-
-def test_request_cases_hash_rule():
-    """The request cases hash is the SHA-256 of the compact sorted-key JSON."""
-    cases = [{"input": "café", "expected": "CAFÉ"}, {"input": "b", "expected": 2}]
-    text = json.dumps(cases, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    assert text == '[{"expected":"CAFÉ","input":"café"},{"expected":2,"input":"b"}]'
-    assert (
-        _sha256(text.encode("utf-8"))
-        == "8bd9a64966e3a93ec1736d506f4535affb9098fbab0860b550e707343b481f6e"
+        + _sha256(files[path]).encode()
+        for path in sorted(files, key=lambda path: path.encode("utf-8"))
     )
 
 
-def test_change_hash_rule():
-    """The change hash is the SHA-256 of the patch text as UTF-8."""
-    patch = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-X = 1\n+X = 2\n"
-    assert (
-        _sha256(patch.encode("utf-8"))
-        == "18b48432344deb00d1f9ee5a1d55457a1479f62539deecbb79989aa70edf2dc7"
+def _readme_section():
+    """Return the text of the run record section of the README.
+
+    Returns:
+        The text from the section heading to the end of the file.
+    """
+    return README.read_text(encoding="utf-8").split("\n## The run record\n", 1)[1]
+
+
+def _run_readme_command(marker, cwd):
+    """Run one ``python3 -c`` command of the run record section as the README gives it.
+
+    Args:
+        marker: A text that only the wanted command holds.
+        cwd: The directory to run the command in.
+
+    Returns:
+        The output of the command, with no space at the ends.
+    """
+    lines = [line.strip() for line in _readme_section().splitlines()]
+    (command,) = [line for line in lines if line.startswith("python3 -c ") and marker in line]
+    # The command names python3: put the interpreter of the tests first on the path.
+    path = f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"
+    done = subprocess.run(
+        ["sh", "-c", command],
+        cwd=cwd,
+        env={**os.environ, "PATH": path},
+        capture_output=True,
+        text=True,
+        check=True,
     )
+    return done.stdout.strip()
+
+
+def test_readme_example_record():
+    """The example record in the README passes the schema and holds the hashes of the inputs."""
+    block = _readme_section().split("```json\n", 1)[1].split("```", 1)[0]
+    record = json.loads(block)
+    VALIDATOR.validate(record)
+    assert record["contract_sha256"] == _sha256(CONTRACT)
+    assert record["metric_sha256"] == _sha256(_metric_parts(METRIC_FILES))
+    assert record["change_sha256"] == _sha256(PATCH.encode("utf-8"))
+
+
+def test_metric_parts_form():
+    """The metric parts are in sorted path order, each with its path, length and hash."""
+    first = b"lib/util.py\x006\x00" + _sha256(b"X = 1\n").encode()
+    assert _metric_parts(METRIC_FILES).startswith(first + b"metric.py\x00")
+
+
+def test_readme_metric_command(tmp_path):
+    """The metric hash command in the README gives the hash of the joined parts."""
+    for path, data in METRIC_FILES.items():
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_bytes(data)
+    assert _run_readme_command("sys.argv", tmp_path) == _sha256(_metric_parts(METRIC_FILES))
+
+
+def test_readme_request_cases_command(tmp_path):
+    """The request cases command in the README gives the hash of the compact sorted-key JSON."""
+    cases_file = tmp_path / "cases.json"
+    cases_file.write_text(json.dumps(REQUEST_CASES, ensure_ascii=False, indent=2), encoding="utf-8")
+    text = '[{"expected":"CAFÉ","input":"café"},{"expected":2,"input":"b"}]'
+    assert _run_readme_command("sys.stdin", tmp_path) == _sha256(text.encode("utf-8"))
