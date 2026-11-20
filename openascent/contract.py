@@ -1758,9 +1758,8 @@ def parse_constraints(
     if "rules" in document:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: [rules] is no longer supported. Move the rules into a markdown"
-            " file in the"
-            " repository, one top-level '- ' bullet for each rule, and set illegal = \"<path>\" in"
-            " [proposer].",
+            " file in the repository, one top-level '- ' bullet for each rule, and set"
+            ' illegal = "<path>" in [proposer].',
             section="rules",
         )
     for name, section in document.items():
