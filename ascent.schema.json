@@ -71,7 +71,7 @@
             "maxLength": 253
           },
           "maxItems": 100,
-          "description": "The host names the role can reach; [] for no network."
+          "description": "The public host names the role can reach; [] for no network."
         },
         "services": {
           "type": "array",
@@ -90,7 +90,8 @@
           "items": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 300
+            "maxLength": 300,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$"
           },
           "minItems": 1,
           "maxItems": 50
@@ -100,7 +101,8 @@
           "items": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 300
+            "maxLength": 300,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$"
           },
           "minItems": 1,
           "maxItems": 50
@@ -122,7 +124,7 @@
             "maxLength": 253
           },
           "maxItems": 100,
-          "description": "The host names the role can reach; [] for no network."
+          "description": "The public host names the role can reach; [] for no network."
         },
         "services": {
           "type": "array",
@@ -164,7 +166,8 @@
               "items": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 300
+                "maxLength": 300,
+                "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$"
               },
               "minItems": 1,
               "maxItems": 50
@@ -224,7 +227,7 @@
             "maxLength": 253
           },
           "maxItems": 100,
-          "description": "The host names the role can reach; [] for no network."
+          "description": "The public host names the role can reach; [] for no network."
         },
         "services": {
           "type": "array",
@@ -250,7 +253,8 @@
               "items": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 300
+                "maxLength": 300,
+                "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$"
               },
               "minItems": 1,
               "maxItems": 50
@@ -344,7 +348,7 @@
               "maxLength": 253
             },
             "maxItems": 100,
-            "description": "The host names the role can reach; [] for no network."
+            "description": "The public host names the role can reach; [] for no network."
           },
           "services": {
             "type": "array",
@@ -370,7 +374,8 @@
                 "items": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 300
+                  "maxLength": 300,
+                  "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$"
                 },
                 "minItems": 1,
                 "maxItems": 50

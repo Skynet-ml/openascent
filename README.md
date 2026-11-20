@@ -265,7 +265,7 @@ The schema holds the sections, the keys and the type of each value. It cannot ho
 
 - The rules across sections. For example, a `[metric]` needs a `[run]` or a `[target.<name>]` stage, a command `[metric] entry` needs a `[run]`, and `[proposer] setup` needs `[proposer] entry`.
 - The rules on the paths. For example, a path must stay inside the repository, a file that one role sees cannot be hidden from it, and `[paths] protected` cannot protect the whole repository.
-- The rules on secrets and hosts. For example, a header holds a secret only as `${NAME}`, a service url must be https on a public host, and one secret cannot go to two hosts.
+- The rules on secrets and hosts. For example, a header holds a secret only as `${NAME}`, a service url must be https on a public host, a `[network]` host must be a public host, and one secret cannot go to two hosts.
 - The runner limits. The schema uses the default limits.
 - The rules on the files that the contract names.
 

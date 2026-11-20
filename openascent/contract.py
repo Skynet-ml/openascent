@@ -599,6 +599,30 @@ def _text(value: Any, setting: str, limit: int) -> str:
     return value.strip()
 
 
+def _shell_command(value: Any, setting: str) -> str:
+    """Read one shell command, such as ``[setup] command``.
+
+    Args:
+        value: The value as parsed.
+        setting: The setting's name, used in errors.
+
+    Returns:
+        The stripped command.
+
+    Raises:
+        ConstraintsError: When the value is not text of 1 to the command limit
+            of characters, or holds a control character.
+    """
+    command = _text(value, setting, _MAX_COMMAND_CHARS)
+    if _CONTROL_CHARS.search(command):
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {setting} must be one command without control characters, such"
+            ' as "pip install -r requirements.txt".',
+            **_at(setting),
+        )
+    return command
+
+
 def _one_file(raw: Any, setting: str) -> str:
     """Read the repository path of one file, such as an ``.mcp.json`` or a rule file.
 
@@ -681,7 +705,8 @@ def _network(section: Mapping[str, Any], label: str) -> tuple[str, ...] | None:
         The distinct hosts, ``()`` for offline, or ``None`` when the key is absent.
 
     Raises:
-        ConstraintsError: When the value is not a list of host names.
+        ConstraintsError: When the value is not a list of host names, or a host
+            fails the public-host check of :func:`_public_host`.
     """
     if "network" not in section:
         return None
@@ -697,6 +722,14 @@ def _network(section: Mapping[str, Any], label: str) -> tuple[str, ...] | None:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: {label} network entry {str(host)[:100]!r} must be a host name"
                 " such as api.example.com, not a URL. Use network = [] for no network.",
+                **_at(f"{label} network"),
+            )
+        # The same rules as a service url, so an allowlist cannot open a path to internal hosts.
+        name = host.lower().removeprefix("*.").partition(":")[0]
+        if not _public_host(name):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {label} network entry {host!r} must name a public host such"
+                " as api.example.com, not an IP address or localhost.",
                 **_at(f"{label} network"),
             )
     return tuple(dict.fromkeys(host.lower() for host in hosts))
@@ -830,7 +863,10 @@ def _entry(value: Any, label: str) -> str | tuple[str, ...]:
         not isinstance(value, list)
         or not 1 <= len(value) <= _MAX_COMMAND_PARTS
         or not all(
-            isinstance(part, str) and part.strip() and len(part) <= _MAX_COMMAND_CHARS
+            isinstance(part, str)
+            and part.strip()
+            and len(part) <= _MAX_COMMAND_CHARS
+            and not _CONTROL_CHARS.search(part)
             for part in value
         )
     ):
@@ -1171,6 +1207,44 @@ def _service(section: Any, name: str) -> ServiceSpec:
     )
 
 
+def _public_host(host: str) -> bool:
+    """Return whether a host name passes the parse-time public-host check.
+
+    The check reads only the text. A public name can still resolve to a private
+    address, so the caller that connects must check the address too.
+
+    Args:
+        host: The lowercase host, without a port, a ``*.`` prefix or a final dot.
+
+    Returns:
+        ``False`` for an IP address, ``localhost``, a name that ends in
+        ``.localhost``, ``.internal`` or ``.local``, a name that holds a dotted
+        IPv4 address, a name with no dot, or a name whose last label has no letter.
+    """
+    try:
+        ipaddress.ip_address(host)
+        return False
+    except ValueError:
+        pass
+    # inet_aton reads the IPv4 forms that ip_address refuses, such as 0x7f.0x1 or
+    # 169.254.169.0xfe, the way an HTTP client resolves them.
+    try:
+        socket.inet_aton(host)
+        return False
+    except (OSError, ValueError):  # ValueError: a NUL in the host, which TOML's \u0000 allows
+        pass
+    # A last label with no letter also catches IP forms that ip_address refuses, such as 0x7f.1.
+    last = host.rsplit(".", 1)[-1]
+    return not (
+        host == "localhost"
+        or host.endswith((".localhost", ".internal", ".local"))
+        or _DOTTED_IPV4.search(host)
+        or "." not in host
+        or not _HOST.fullmatch(host)
+        or not any(char.isalpha() for char in last)
+    )
+
+
 def _service_url(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> str:
     """Read the ``url`` of a service or an http MCP server: https on a public host (E45, E49).
 
@@ -1227,31 +1301,7 @@ def _service_url(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> str:
             " headers.",
             **_at(f"{label} url"),
         )
-    host = (parts.hostname or "").rstrip(".")
-    try:
-        ipaddress.ip_address(host)
-        is_ip = True
-    except ValueError:
-        is_ip = False
-    if not is_ip:
-        # inet_aton reads the IPv4 forms that ip_address refuses, such as 0x7f.0x1 or
-        # 169.254.169.0xfe, the way an HTTP client resolves them.
-        try:
-            socket.inet_aton(host)
-            is_ip = True
-        except (OSError, ValueError):  # ValueError: a NUL in the host, which TOML's \u0000 allows
-            pass
-    # A last label with no letter also catches IP forms that ip_address refuses, such as 0x7f.1.
-    last = host.rsplit(".", 1)[-1]
-    if (
-        is_ip
-        or host == "localhost"
-        or host.endswith((".localhost", ".internal", ".local"))
-        or _DOTTED_IPV4.search(host)
-        or "." not in host
-        or not _HOST.fullmatch(host)
-        or not any(char.isalpha() for char in last)
-    ):
+    if not _public_host((parts.hostname or "").rstrip(".")):
         raise ConstraintsError(
             f"{prefix}: {label} url must name a public host such as api.example.com, not an IP"
             " address or localhost.",
@@ -1519,11 +1569,7 @@ def _metric(section: Mapping[str, Any]) -> MetricSpec:
             section="metric",
             key="direction",
         )
-    setup = (
-        _text(section["setup"], "[metric] setup", _MAX_COMMAND_CHARS)
-        if "setup" in section
-        else None
-    )
+    setup = _shell_command(section["setup"], "[metric] setup") if "setup" in section else None
     return MetricSpec(
         files=files,
         exploits=exploits,
@@ -1916,7 +1962,7 @@ def parse_constraints(
         sha256=hashlib.sha256(raw).hexdigest(),
         editable_paths=editable,
         protected_paths=protected,
-        setup_command=_text(setup["command"], "[setup] command", _MAX_COMMAND_CHARS)
+        setup_command=_shell_command(setup["command"], "[setup] command")
         if "command" in setup
         else None,
         run_entry=run_entry,
@@ -2620,8 +2666,9 @@ def effective_environment(
 ) -> RepoEnvironment:
     """Combine the customer's approved settings with what the repository proposes.
 
-    The constraints file and every instructions, rule or MCP file it names
-    are always protected, so no version can change the rules it is scored under.
+    The constraints file and every instructions, rule, MCP or Compose file it
+    names are always protected, so no version can change the rules it is scored
+    under or the services beside the scorer.
 
     Args:
         constraints: The repository's proposal, or ``None`` when it has none.
@@ -2678,6 +2725,7 @@ def effective_environment(
                 CONSTRAINTS_FILE,
                 *constraints.rule_files,
                 *constraints.mcp_files,
+                *((constraints.compose_file,) if constraints.compose_file else ()),
                 *constraints.protected_paths,
                 *command_files,
             )

@@ -3441,3 +3441,195 @@ def test_a_bad_metric_setup_fails_with_the_setup_command_limit(value: bytes) -> 
     ) as caught:
         parse_constraints(raw)
     assert (caught.value.section, caught.value.key) == ("metric", "setup")
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1",
+        "10.0.0.5:443",
+        "*.10.0.0.5",
+        "::1",
+        "[::1]",
+        "[::1]:443",
+        "fd00::1",
+        "localhost",
+        "LOCALHOST",
+        "localhost:8000",
+        "*.localhost",
+        "api.localhost",
+        "metadata.google.internal",
+        "*.internal",
+        "*.corp.internal:443",
+        "printer.local",
+        "*.svc.cluster.local",
+        "intranet",
+        "intranet:8080",
+        "*.com",
+        "169.254.169.254.nip.io",
+        "*.10.0.0.5.sslip.io:443",
+        "0x7f.1",
+        "example.123",
+        "*.example.123:443",
+        "2130706433",
+    ],
+)
+def test_a_private_network_host_fails_with_a_reason(host: str) -> None:
+    """A ``network`` host fails the public-host rules of a service url (SKY-879).
+
+    The check runs after the ``*.`` prefix and the ``:port`` are removed.
+
+    Args:
+        host: A host that names an internal address or no public domain.
+    """
+    raw = f'version = 1\n[run]\nentry = "run.py:main"\nnetwork = ["{host}"]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=r"\[run\] network entry ") as caught:
+        parse_constraints(raw)
+    assert (caught.value.section, caught.value.key) == ("run", "network")
+
+
+@pytest.mark.parametrize("label", ["[proposer]", "[metric]", "[target.s]"])
+def test_every_role_refuses_a_private_network_host(label: str) -> None:
+    """Each role's ``network`` gets the same public-host rules (SKY-879).
+
+    Args:
+        label: The table under test.
+    """
+    entry = 'entry = "s.py:f"\n' if label == "[target.s]" else ""
+    raw = (
+        f'version = 1\n[run]\nentry = "run.py:main"\n{label}\n{entry}network = ["localhost"]\n'
+    ).encode()
+
+    with pytest.raises(ConstraintsError, match=rf"{re.escape(label)} network entry 'localhost'"):
+        parse_constraints(raw)
+
+
+def test_a_public_network_host_with_a_wildcard_or_a_port_is_kept() -> None:
+    """A public host passes with a ``*.`` prefix or a ``:port``, in lowercase (SKY-879)."""
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\n'
+        b'network = ["API.example.com", "*.example.com", "api.example.com:8443", "*.co.uk:443"]\n'
+    )
+
+    assert parse_constraints(raw).run_role.network == (
+        "api.example.com",
+        "*.example.com",
+        "api.example.com:8443",
+        "*.co.uk:443",
+    )
+
+
+_SETUP_CONTROL_CHARS = [
+    r"\u0000",
+    r"\n",
+    r"\t",
+    r"\u001f",
+    r"\u007f",
+    r"\u0085",
+    r"\u061c",
+    r"\u200e",
+    r"\u202e",
+    r"\u2066",
+]
+
+
+@pytest.mark.parametrize("char", _SETUP_CONTROL_CHARS)
+@pytest.mark.parametrize(
+    ("section", "key", "head", "tail"),
+    [
+        ("setup", "command", "", _RUN.decode()),
+        ("metric", "setup", "", _RUN.decode()),
+    ],
+)
+def test_a_setup_command_with_a_control_character_fails(
+    section: str, key: str, head: str, tail: str, char: str
+) -> None:
+    """``[setup] command`` and ``[metric] setup`` refuse a control character (SKY-879).
+
+    A NUL makes ``Popen`` fail later, and a newline or a bidi control hides what runs.
+
+    Args:
+        section: The table under test.
+        key: The setting under test.
+        head: TOML before the table.
+        tail: TOML after the table.
+        char: A TOML escape of a control character.
+    """
+    raw = f'version = 1\n{head}[{section}]\n{key} = "pip install{char} -r x.txt"\n{tail}'.encode()
+
+    with pytest.raises(
+        ConstraintsError, match=rf"\[{section}\] {key} must be one command without control"
+    ) as caught:
+        parse_constraints(raw)
+    assert (caught.value.section, caught.value.key) == (section, key)
+
+
+@pytest.mark.parametrize("section", ["setup", "metric"])
+def test_a_setup_command_with_a_zwj_or_surrounding_newlines_is_kept(section: str) -> None:
+    """A ZWJ stays legal, and the newlines that strip removes do not fail (SKY-879).
+
+    Args:
+        section: The table under test.
+    """
+    key = "command" if section == "setup" else "setup"
+    raw = f'version = 1\n[{section}]\n{key} = """\nnpm ci \\u200d\n"""\n'.encode() + _RUN
+
+    constraints = parse_constraints(raw)
+    command = constraints.setup_command if section == "setup" else constraints.metric.setup
+    assert command == "npm ci \u200d"
+
+
+@pytest.mark.parametrize("char", _SETUP_CONTROL_CHARS)
+@pytest.mark.parametrize("index", [0, 1, 2])
+@pytest.mark.parametrize("label", ["[run]", "[metric]", "[target.s]"])
+def test_a_command_entry_with_a_control_character_in_any_part_fails(
+    label: str, index: int, char: str
+) -> None:
+    """Every part of a command-list ``entry`` refuses a control character (SKY-879).
+
+    Args:
+        label: The table under test.
+        index: The part that holds the control character.
+        char: A TOML escape of a control character.
+    """
+    parts = ['"node"', '"run.js"', '"--fast"']
+    parts[index] = f'"{parts[index][1:-1]}{char}"'
+    entry = f"entry = [{', '.join(parts)}]\n"
+    if label == "[metric]":
+        raw = f'version = 1\n[metric]\nfiles = ["run.js"]\n{entry}' + _RUN.decode()
+    elif label == "[run]":
+        raw = f"version = 1\n[run]\n{entry}"
+    else:
+        raw = f"version = 1\n[target.s]\n{entry}"
+
+    with pytest.raises(ConstraintsError, match=rf"{re.escape(label)} entry must be") as caught:
+        parse_constraints(raw.encode())
+    assert caught.value.key == "entry"
+
+
+def test_the_compose_file_is_protected_when_it_is_set() -> None:
+    """``effective_environment`` protects the ``[sandbox] compose`` file (SKY-879).
+
+    A version that rewrites it could change the services beside the scorer.
+    """
+    with_compose = parse_constraints(_COMPOSE)
+    without = parse_constraints(b"version = 1\n" + _RUN)
+
+    protected = effective_environment(
+        with_compose, approved_editable=["."], approved_setup=None
+    ).protected_paths
+    plain = effective_environment(
+        without, approved_editable=["."], approved_setup=None
+    ).protected_paths
+
+    assert "compose.yaml" in protected
+    assert plain == (CONSTRAINTS_FILE,)
+
+
+def test_an_editable_compose_file_alone_leaves_nothing_to_change() -> None:
+    """When the Compose file is the only editable path, the run fails before it starts (SKY-879)."""
+    constraints = parse_constraints(_COMPOSE)
+
+    with pytest.raises(ConstraintsError, match="protects every editable path"):
+        effective_environment(constraints, approved_editable=["compose.yaml"], approved_setup=None)
