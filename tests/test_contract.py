@@ -13,8 +13,6 @@ from pathlib import Path
 import pytest
 
 from openascent.contract import (
-    _ARRAY_LINE,
-    _HEADER_LINE,
     CONSTRAINTS_FILE,
     ERROR,
     ConstraintsError,
@@ -26,6 +24,7 @@ from openascent.contract import (
     RunnerLimits,
     ServiceSpec,
     TargetStage,
+    _header_parts,
     _inside,
     _service_url,
     _with_lines,
@@ -3927,8 +3926,8 @@ def test_a_long_hostile_header_line_is_scanned_in_linear_time() -> None:
     with pytest.raises(ConstraintsError) as caught:
         parse_constraints(raw.encode())
     # The scan skips a multi-line string, so the header patterns are timed on the line too.
-    assert _HEADER_LINE.fullmatch(hostile) is None
-    assert _ARRAY_LINE.fullmatch("[" + hostile) is None
+    assert _header_parts(hostile) is None
+    assert _header_parts("[" + hostile) is None
 
     assert time.monotonic() - start < 1
     assert {(e.line, e.key) for e in caught.value.errors} == {(4, "vcpus"), (5, "note")}
@@ -4317,3 +4316,152 @@ def test_a_good_mcp_file_that_two_roles_name_gives_both_its_servers(tmp_path: Pa
 
     assert constraints.proposer.mcp_servers == constraints.run_role.mcp_servers
     assert [server.name for server in constraints.run_role.mcp_servers] == ["m"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\nprotected = [".", "b/"]\n',
+            [
+                (5, "paths", "protected", "'b/' in [paths] protected must be written 'b'"),
+                (5, "paths", "protected", "[paths] protected cannot protect the whole repository."),
+            ],
+        ),
+        (
+            _VALID_RUN + b'[metric]\nfiles = [".", "x/"]\n',
+            [
+                (5, "metric", "files", "'x/' in [metric] files must be written 'x'"),
+                (4, "metric", None, "[metric] cannot name the whole repository."),
+            ],
+        ),
+        (
+            _VALID_RUN + b'services = ["nope", 5]\n',
+            [
+                (4, "run", "services", "[run] services must be text of 1 to 100 characters."),
+                (4, "run", "services", "[run] services names 'nope', but the file has no"),
+            ],
+        ),
+        (
+            b'version = 1\n[run]\nentry = ["metric/x.sh"]\ntimeout = -1\n'
+            b'[metric]\nfiles = ["metric"]\n',
+            [
+                (4, "run", "timeout", "[run] timeout must be a positive number"),
+                (3, "run", "entry", "[run] entry names 'metric/x.sh', which is inside the hidden"),
+            ],
+        ),
+        (
+            _VALID_RUN + b'network = ["10.0.0.1", "a.com", "a.com"]\n',
+            [
+                (4, "run", "network", "[run] network entry '10.0.0.1' must name a public host"),
+                (4, "run", "network", "[run] network holds 'a.com' more than once."),
+            ],
+        ),
+    ],
+    ids=["protected", "metric-files", "services", "run-timeout", "network"],
+)
+def test_one_bad_list_item_hides_no_check_of_the_other_items(
+    raw: bytes, expected: list[tuple[int, str, str | None, str]]
+) -> None:
+    """A bad item or a bad timeout keeps the valid values, so their own checks still run."""
+    errors = _errors(raw)
+
+    assert [(line, section, key) for line, section, key, _ in errors] == [
+        (line, section, key) for line, section, key, _ in expected
+    ]
+    assert all(part in message for (*_, message), (*_, part) in zip(errors, expected, strict=True))
+
+
+def test_a_list_of_only_bad_editable_paths_gets_no_empty_list_error() -> None:
+    """Every path of editable is bad, so each path gets its error and the list no second one."""
+    errors = _errors(_VALID_RUN + b'[paths]\neditable = ["a/", "/b"]\n')
+
+    assert [(line, key) for line, _, key, _ in errors] == [(5, "editable"), (5, "editable")]
+    assert not any("is empty" in message for *_, message in errors)
+
+
+def test_a_version_table_gets_only_the_type_error() -> None:
+    """[version] is a version of the wrong type, not a missing version."""
+    assert _errors(b'[version]\n[run]\nentry = "run.py:main"\n') == [
+        (1, None, "version", "ascent.toml: version {} is not supported; use version = 1.")
+    ]
+
+
+def test_a_quoted_header_part_with_a_bracket_keeps_its_lines() -> None:
+    """A header such as [target."a]b"] is read with its quotes, so its keys keep their section."""
+    errors = _errors(_VALID_RUN + b'[target."a]b"]\nentry = "s.py:main"\nvcpus = 3\n')
+
+    assert [(line, section, key) for line, section, key, _ in errors] == [
+        (4, "target.a]b", None),
+        (6, "target.a]b", "vcpus"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "line",
+    ['[target."a]b"', '[target."a]b"] x', '[[target."a]b"]', '["a" "b"]', "[ ]"],
+)
+def test_a_line_that_only_looks_like_a_header_is_no_header(line: str) -> None:
+    """A header must close, and only a comment may follow it."""
+    assert _header_parts(line) is None
+
+
+def test_a_header_line_gives_its_decoded_parts() -> None:
+    """Quoted parts are decoded, and a [[name]] array is a header too."""
+    assert _header_parts(' [ target . "a]b" ] # note') == ["target", "a]b"]
+    assert _header_parts("[[tool.x]]") == ["tool", "x"]
+    assert _header_parts('["a\\u0062"]') == ["ab"]
+
+
+def test_a_rule_file_of_many_bad_lines_reports_only_the_first_ones(tmp_path: Path) -> None:
+    """A rule file of 300 stray lines gives 100 line errors and one error that says so."""
+    raw = _VALID_RUN + b'illegal = "r.md"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "r.md": b"x\n" * 300})
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    messages = [d.message for d in caught.value.errors]
+    assert len(messages) == 101
+    assert all("is not part of a top-level bullet" in message for message in messages[:100])
+    assert messages[-1] == (
+        "ascent.toml: 'r.md' ([run] illegal) has more than 100 errors; only the first 100 are"
+        " shown."
+    )
+
+
+def test_one_check_reports_at_most_500_errors(tmp_path: Path) -> None:
+    """Six rule files of bad lines give 606 errors; the check shows 500 and counts the rest."""
+    raw = (
+        _VALID_RUN
+        + b'illegal = "r0.md"\n'
+        + b"".join(
+            f'[target.s{n}]\nentry = "s.py:main"\nillegal = "r{n}.md"\n'.encode()
+            for n in range(1, 6)
+        )
+    )
+    files = {CONSTRAINTS_FILE: raw} | {f"r{n}.md": b"x\n" * 300 for n in range(6)}
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(_archive(tmp_path, files))
+
+    errors = caught.value.errors
+    assert len(errors) == 501
+    assert errors[-1] == Diagnostic(
+        level=ERROR,
+        message="ascent.toml: 106 more errors are not shown. Fix the errors above and check again.",
+    )
+
+
+def test_the_named_files_are_checked_only_when_ascent_toml_has_no_error(tmp_path: Path) -> None:
+    """With an error in ascent.toml, a missing rule file gets no error until the file is fixed."""
+    raw = _VALID_RUN + b'illegal = "missing.md"\nvcpus = 3\n'
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw}))
+    assert [(d.line, d.key) for d in caught.value.errors] == [(5, "vcpus")]
+
+    fixed = _VALID_RUN + b'illegal = "missing.md"\n'
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: fixed}))
+    assert [(d.line, d.key) for d in caught.value.errors] == [(4, "illegal")]

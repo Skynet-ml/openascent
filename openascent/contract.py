@@ -57,6 +57,8 @@ _MAX_CASES_FILE_BYTES = 20 * 1024 * 1024
 _MAX_CASES = 200_000
 # A cases file can be 20 MiB, so a file of bad lines reports only the first ones.
 _MAX_CASE_LINE_ERRORS = 100
+# One check reports at most this many errors, however many files have errors.
+_MAX_ERRORS = 500
 _CASE_KEYS = frozenset({"input", "expected"})
 _MAX_COMMAND_CHARS = 300
 _MAX_RULES = 50
@@ -262,26 +264,83 @@ class _Problems:
 
         Args:
             text: The text of the contract file, to find the line of each error.
+                Only the full check passes it, so only that error list is capped
+                at ``_MAX_ERRORS``.
 
         Raises:
             ConstraintsError: When an error was recorded.
         """
         if not self.errors:
             return
-        errors = _with_lines(self.errors, text) if text is not None else self.errors
+        errors = self.errors
+        if text is not None:
+            hidden = len(errors) - _MAX_ERRORS
+            errors = _with_lines(errors[:_MAX_ERRORS], text)
+            if hidden > 0:
+                errors.append(
+                    Diagnostic(
+                        level=ERROR,
+                        message=f"{CONSTRAINTS_FILE}: {hidden} more errors are not shown. Fix"
+                        " the errors above and check again.",
+                    )
+                )
         first = errors[0]
         raise ConstraintsError(first.message, section=first.section, key=first.key, errors=errors)
 
 
-# A table header such as [target.planner]; [[name]] arrays are not contract sections.
-# No two quantifiers can match the same text, so a hostile line takes linear time.
-_HEADER_LINE = re.compile(r"\s*\[([^\[\]]*)\]\s*(?:#.*)?")
-_ARRAY_LINE = re.compile(r"\s*\[\[([^\[\]]*)\]\]\s*(?:#.*)?")
 # Contract names are at most four parts deep, such as services.maps.headers.X;
 # a cap keeps a hostile dotted name of 30000 parts linear in the line scan.
 _MAX_NAME_PARTS = 8
 # One part of a dotted key, and the "." or "=" after it.
+# No two quantifiers can match the same text, so a hostile line takes linear time.
 _KEY_PART = re.compile(r"""\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*([.=])""")
+# One part of a table header name, and the "." or "]" after it. A quoted part
+# can hold "]", such as [target."a]b"].
+_HEADER_PART = re.compile(r"""\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*([.\]])""")
+# The start of a table header such as [target.planner], or of a [[name]] array.
+_HEADER_OPEN = re.compile(r"\s*\[\[?")
+_HEADER_END = re.compile(r"\s*(?:#.*)?")
+
+
+def _part(match: re.Match[str]) -> str:
+    """Return the decoded name of one matched key part or header part.
+
+    Args:
+        match: A match of ``_KEY_PART`` or ``_HEADER_PART``.
+
+    Returns:
+        The part's name, with the escapes of a double-quoted part decoded.
+    """
+    if match.group(1) is not None:
+        return _basic_key(match.group(1))
+    return match.group(2) if match.group(2) is not None else match.group(3)
+
+
+def _header_parts(line: str) -> list[str] | None:
+    """Read a table header line, such as ``[target."a]b"]`` or ``[[name]]``.
+
+    Args:
+        line: One line of the file.
+
+    Returns:
+        The decoded parts of the header's name, or ``None`` when the line is
+        not a header.
+    """
+    opening = _HEADER_OPEN.match(line)
+    if opening is None:
+        return None
+    parts: list[str] = []
+    index = opening.end()
+    while (part := _HEADER_PART.match(line, index)) is not None:
+        parts.append(_part(part))
+        index = part.end()
+        if part.group(4) == "]":
+            if opening.group().endswith("[["):
+                if not line.startswith("]", index):
+                    return None
+                index += 1
+            return parts if _HEADER_END.fullmatch(line, index) else None
+    return None
 
 
 def _key_parts(line: str) -> tuple[list[str], int] | None:
@@ -297,10 +356,7 @@ def _key_parts(line: str) -> tuple[list[str], int] | None:
     parts: list[str] = []
     index = 0
     while (part := _KEY_PART.match(line, index)) is not None:
-        if part.group(1) is not None:
-            parts.append(_basic_key(part.group(1)))
-        else:
-            parts.append(part.group(2) if part.group(2) is not None else part.group(3))
+        parts.append(_part(part))
         index = part.end()
         if part.group(4) == "=":
             return parts, index
@@ -331,9 +387,9 @@ def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
         if depth or open_string:
             depth, open_string = _value_state(line, 0, depth, open_string)
             continue
-        header = _HEADER_LINE.fullmatch(line) or _ARRAY_LINE.fullmatch(line)
-        if header is not None and header.group(1).strip():
-            section = ".".join(part.strip().strip("\"'") for part in header.group(1).split("."))
+        header = _header_parts(line)
+        if header is not None:
+            section = ".".join(header)
             headers.setdefault(section, number)
             names = section.split(".", _MAX_NAME_PARTS)
             for count in range(1, min(len(names), _MAX_NAME_PARTS)):
@@ -851,59 +907,55 @@ def _clean_path(raw: Any, setting: str) -> str:
     return clean
 
 
-def _distinct(values: Sequence[str], setting: str) -> tuple[str, ...]:
-    """Refuse a value that a list holds twice: a list has one form, with each value once.
+def _distinct(values: Sequence[str], setting: str, problems: _Problems) -> tuple[str, ...]:
+    """Record each value that a list holds twice: a list has one form, with each value once.
 
     Args:
         values: The checked values, in file order.
         setting: The setting of the list, named in errors.
+        problems: Records each error.
 
     Returns:
-        The values.
-
-    Raises:
-        ConstraintsError: When a value is in the list more than once.
+        Each value once, in file order, so a duplicate hides no other mistake.
     """
-    problems = _Problems()
-    for value in dict.fromkeys(value for value in values if values.count(value) > 1):
-        problems.add(
-            f"{CONSTRAINTS_FILE}: {setting} holds '{value}' more than once. List each value once.",
-            **_at(setting),
-        )
-    problems.raise_any()
-    return tuple(values)
+    unique = tuple(dict.fromkeys(values))
+    if len(unique) < len(values):
+        for value in dict.fromkeys(value for value in values if values.count(value) > 1):
+            problems.add(
+                f"{CONSTRAINTS_FILE}: {setting} holds '{value}' more than once. List each value"
+                " once.",
+                **_at(setting),
+            )
+    return unique
 
 
 def _paths(
-    section: Mapping[str, Any], key: str, section_name: str = "paths"
+    section: Mapping[str, Any], key: str, problems: _Problems, section_name: str = "paths"
 ) -> tuple[str, ...] | None:
     """Read one list of paths from a section.
 
     Args:
         section: The parsed table.
         key: The setting, such as ``editable`` or ``files``.
+        problems: Records each error.
         section_name: The table's name, used in errors.
 
     Returns:
-        The cleaned paths, or ``None`` when the key is absent.
-
-    Raises:
-        ConstraintsError: When the value is not a list of distinct paths.
+        The valid paths, each once, so one bad path hides no check of the others;
+        ``None`` when the key is absent or the value is not a bounded list.
     """
     if key not in section:
         return None
     setting = f"[{section_name}] {key}"
     values = section[key]
     if not isinstance(values, list) or len(values) > _MAX_PATHS:
-        raise ConstraintsError(
+        problems.add(
             f"{CONSTRAINTS_FILE}: {setting} must be a list of at most {_MAX_PATHS} paths.",
             **_at(setting),
         )
-    problems = _Problems()
+        return None
     paths = [problems.check(_clean_path, value, setting) for value in values]
-    paths = problems.check(_distinct, [path for path in paths if path is not None], setting)
-    problems.raise_any()
-    return paths
+    return _distinct([path for path in paths if path is not None], setting, problems)
 
 
 def _text(value: Any, setting: str, limit: int) -> str:
@@ -1020,32 +1072,31 @@ def _illegal_file(section: Mapping[str, Any], label: str) -> str | None:
     return _one_file(section["illegal"], f"{label} illegal")
 
 
-def _names(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...]:
+def _names(
+    section: Mapping[str, Any], key: str, label: str, problems: _Problems
+) -> tuple[str, ...]:
     """Read an optional list of short names, such as tools or services.
 
     Args:
         section: The parsed table.
         key: The setting.
         label: The table as the file names it, used in errors.
+        problems: Records each error.
 
     Returns:
-        The names in file order; empty when the key is absent.
-
-    Raises:
-        ConstraintsError: When the value is not a bounded list of distinct bounded text.
+        The valid names, each once, in file order; empty when the key is absent
+        or the value is not a bounded list.
     """
     values = section.get(key, [])
     setting = f"{label} {key}"
     if not isinstance(values, list) or len(values) > _MAX_NAMES:
-        raise ConstraintsError(
+        problems.add(
             f"{CONSTRAINTS_FILE}: {setting} must be a list of at most {_MAX_NAMES} names.",
             **_at(setting),
         )
-    problems = _Problems()
+        return ()
     names = [problems.check(_text, value, setting, _MAX_NAME_CHARS) for value in values]
-    names = problems.check(_distinct, [name for name in names if name is not None], setting)
-    problems.raise_any()
-    return names
+    return _distinct([name for name in names if name is not None], setting, problems)
 
 
 def _network_host(host: Any, label: str) -> str:
@@ -1084,36 +1135,31 @@ def _network_host(host: Any, label: str) -> str:
     return host
 
 
-def _network(section: Mapping[str, Any], label: str) -> tuple[str, ...] | None:
+def _network(section: Mapping[str, Any], label: str, problems: _Problems) -> tuple[str, ...] | None:
     """Read an optional list of allowed hosts.
 
     Args:
         section: The parsed table.
         label: The table as the file names it, used in errors.
+        problems: Records each error, such as a host that fails the public-host
+            check of :func:`_public_host`.
 
     Returns:
-        The hosts, ``()`` for offline, or ``None`` when the key is absent.
-
-    Raises:
-        ConstraintsError: When the value is not a list of distinct host names, or
-            a host fails the public-host check of :func:`_public_host`.
+        The valid hosts, each once; ``()`` for offline; ``None`` when the key is
+        absent or the value is not a bounded list.
     """
     if "network" not in section:
         return None
     hosts = section["network"]
     if not isinstance(hosts, list) or len(hosts) > _MAX_HOSTS:
-        raise ConstraintsError(
+        problems.add(
             f"{CONSTRAINTS_FILE}: {label} network must be a list of at most {_MAX_HOSTS} host"
             " names.",
             **_at(f"{label} network"),
         )
-    problems = _Problems()
+        return None
     checked = [problems.check(_network_host, host, label) for host in hosts]
-    checked = problems.check(
-        _distinct, [host for host in checked if host is not None], f"{label} network"
-    )
-    problems.raise_any()
-    return checked
+    return _distinct([host for host in checked if host is not None], f"{label} network", problems)
 
 
 def _role(
@@ -1132,7 +1178,7 @@ def _role(
     Returns:
         Keyword arguments for :class:`RoleEnvironment`.
     """
-    named = problems.check(_names, section, "services", label, default=())
+    named = _names(section, "services", label, problems)
     for name in named:
         if name not in declared:
             problems.add(
@@ -1142,7 +1188,7 @@ def _role(
             )
     return {
         "mcp": problems.check(_mcp, section, label),
-        "network": problems.check(_network, section, label),
+        "network": _network(section, label, problems),
         "services": tuple(name for name in named if name in declared),
         "illegal_file": problems.check(_illegal_file, section, label),
     }
@@ -1428,25 +1474,22 @@ def _timeout(section: Mapping[str, Any], label: str, unit: str, limits: RunnerLi
 
 
 def _run(
-    section: Mapping[str, Any] | None, limits: RunnerLimits
+    section: Mapping[str, Any] | None, limits: RunnerLimits, problems: _Problems
 ) -> tuple[str | tuple[str, ...] | None, float]:
     """Read the ``[run]`` section: how the runner starts the candidate for each case (E39).
 
     Args:
         section: The parsed ``[run]`` table, or ``None`` when the file has none.
         limits: The runner's limits.
+        problems: Records each error: no entry, or a malformed entry or timeout.
 
     Returns:
-        The entry, or ``None`` when the file has no
-        ``[run]``, and the timeout in seconds for each case.
-
-    Raises:
-        ConstraintsError: With every error of ``[run]``: no entry, or a malformed
-            entry or timeout.
+        The entry, or ``None`` when the file has none or it is malformed, and the
+        timeout in seconds for each case. A bad timeout keeps a valid entry, so
+        the entry's own checks still run.
     """
     if section is None:
         return None, _default_timeout(limits)
-    problems = _Problems()
     if _missing(section, "entry", _SECTIONS["run"]):
         problems.add(
             f"{CONSTRAINTS_FILE}: [run] entry is missing. Name the function"
@@ -1456,9 +1499,8 @@ def _run(
             key="entry",
         )
     entry = problems.check(_entry, section["entry"], "[run]") if "entry" in section else None
-    timeout = problems.check(_timeout, section, "[run]", "case", limits)
-    problems.raise_any()
-    return entry, timeout
+    timeout = problems.check(_timeout, section, "[run]", "case", limits, default=None)
+    return entry, _default_timeout(limits) if timeout is None else timeout
 
 
 def _score_value(value: Any, setting: str, section: str, key: str) -> float:
@@ -1992,7 +2034,7 @@ def _metric(section: Mapping[str, Any], problems: _Problems) -> MetricSpec:
         The section, with the default exploit folder when none is set.
     """
     errors = len(problems.errors)
-    files = problems.check(_paths, section, "files", "metric") or ()
+    files = _paths(section, "files", problems, "metric") or ()
     files_valid = len(problems.errors) == errors
     exploits = problems.check(_metric_path, section, "exploits") or _DEFAULT_EXPLOITS
     reference = problems.check(_metric_path, section, "reference")
@@ -2259,7 +2301,8 @@ def parse_constraints(
         ) from error
     problems = _Problems()
     top_keys = {name: value for name, value in document.items() if not isinstance(value, dict)}
-    if require_version and _missing(top_keys, "version", _TOP_KEYS):
+    # A [version] table is a type error of its own, not a missing version.
+    if require_version and "version" not in document and _missing(top_keys, "version", _TOP_KEYS):
         problems.add(
             f"{CONSTRAINTS_FILE}: version is missing. Put version = 1 at the top of the file,"
             " before any section.",
@@ -2356,15 +2399,16 @@ def parse_constraints(
                 )
     paths = document.get("paths", {})
     setup = document.get("setup", {})
-    protected = problems.check(_paths, paths, "protected") or ()
+    protected = _paths(paths, "protected", problems) or ()
     if "." in protected:
         problems.add(
             f"{CONSTRAINTS_FILE}: [paths] protected cannot protect the whole repository.",
             section="paths",
             key="protected",
         )
-    editable = problems.check(_paths, paths, "editable")
-    if editable == ():
+    editable = _paths(paths, "editable", problems)
+    # A list whose every path is bad already has an error for each path.
+    if editable == () and paths.get("editable") == []:
         problems.add(
             f"{CONSTRAINTS_FILE}: [paths] editable is empty, so no version could change anything."
             " List at least one path, or remove the setting to keep the approved ones.",
@@ -2397,9 +2441,7 @@ def parse_constraints(
             section="proposer",
             key="setup",
         )
-    run_entry, run_timeout = problems.check(
-        _run, document.get("run"), limits, default=(None, _default_timeout(limits))
-    )
+    run_entry, run_timeout = _run(document.get("run"), limits, problems)
     run_section = document.get("run", {})
     run_role = _role(run_section, "[run]", declared, problems)
     metric_section = document.get("metric", {})
@@ -2456,6 +2498,8 @@ def parse_constraints(
     # not name, so checking other paths against it would report a false error.
     if any(error.section == "metric" and error.key == "exploits" for error in problems.errors):
         scoring = tuple(path for path in scoring if path != metric.exploits)
+    # "." already has its own error, and every path is inside it.
+    scoring = tuple(path for path in scoring if path != ".")
     problems.check(
         _refuse_hidden_visible_files,
         (CONSTRAINTS_FILE, *scoring),
@@ -2538,6 +2582,10 @@ def read_constraints(
     compose_parser: Callable[[str], tuple[Any, ...]] | None = None,
 ) -> RepoConstraints | None:
     """Read the constraints file at the root of a packed snapshot.
+
+    The named files are checked only when ``ascent.toml`` itself has no error.
+    When it has one, the raised error lists only the mistakes of ``ascent.toml``,
+    because a path with an error names no file to check.
 
     The package does not know the Compose format, which belongs to the runner.
     With no ``compose_parser``, the ``[sandbox] compose`` file is not read and
@@ -2947,7 +2995,8 @@ def _split_rules(text: str, setting: str, path: str) -> tuple[str, ...]:
     Raises:
         ConstraintsError: With one error for each line of text outside a
             bullet, and for each bullet that is empty or too long, or when the
-            file holds no bullet or more than the maximum bullets.
+            file holds no bullet or more than the maximum bullets. Only the
+            first ``_MAX_CASE_LINE_ERRORS`` errors of the file are reported.
     """
     problems = _Problems()
     rules: list[list[str]] = []
@@ -2993,6 +3042,14 @@ def _split_rules(text: str, setting: str, path: str) -> tuple[str, ...]:
                 f" {_MAX_RULE_CHARS} characters.",
                 **_at(setting),
             )
+    # A 32 KiB file can have thousands of bad lines, so it reports only the first ones.
+    if len(problems.errors) > _MAX_CASE_LINE_ERRORS:
+        del problems.errors[_MAX_CASE_LINE_ERRORS:]
+        problems.add(
+            f"{CONSTRAINTS_FILE}: '{path}' ({setting}) has more than {_MAX_CASE_LINE_ERRORS}"
+            f" errors; only the first {_MAX_CASE_LINE_ERRORS} are shown.",
+            **_at(setting),
+        )
     problems.raise_any()
     return tuple(joined)
 
