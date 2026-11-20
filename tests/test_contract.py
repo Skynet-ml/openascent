@@ -382,6 +382,7 @@ def test_a_proposer_command_that_names_a_key_token_fails(key: str, token: str) -
     ) as caught:
         parse_constraints(raw)
     assert (caught.value.section, caught.value.key) == ("proposer", key)
+    assert "ASCENT_MODEL_KEY environment variable" in str(caught.value)
 
 
 def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: Path) -> None:

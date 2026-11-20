@@ -1423,7 +1423,7 @@ def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...
     if token is not None:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} {key} cannot contain {token}. The command reads the model"
-            " key from the APP_API_KEY environment variable.",
+            " key from the ASCENT_MODEL_KEY environment variable.",
             **_at(f"{label} {key}"),
         )
     return tuple(value)
