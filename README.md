@@ -230,11 +230,11 @@ The module `openascent.contract` reads and checks `ascent.toml`. It uses only th
 - A valid file has its warnings in `contract.warnings`. No check gives a warning yet.
 - The parser does not convert a value. A value in another form fails, and the error gives the one valid form. For example, `"src/"` must be `"src"`, a host must be in lower case, and a list holds each value once.
 - `legacy_forms=True` (a keyword of `parse_constraints` and `read_constraints`) is only for a runner that reads again the contract of a run that started under an older, lenient reader. It accepts each form that the older reader accepted, and gives the same values as that reader:
-  - It strips `[setup] command` and `[metric] setup`, and lets them hold line breaks and tabs.
+  - It strips `[setup] command` and `[metric] setup`, and lets them hold any control character, such as a line break or a tab.
   - It cleans a path: spaces around it, `\` between folders, a `/` at the end.
   - It strips each name of a `services` list.
   - It puts a `network` host in lower case.
-  - It lets a part of a command `entry` hold a control character.
+  - It lets a command `entry` of `[run]`, `[metric]` or a target hold a control character. `[proposer] entry` and `[proposer] setup` still refuse one.
   - It drops a value that a list holds twice, with no error, and keeps the first.
   - `read_constraints` also matches an MCP server `type` in any case, in the `.mcp.json` files that it reads.
 

@@ -866,8 +866,8 @@ class RepoEnvironment:
         }
 
 
-# Set only for the duration of one parse_constraints or read_constraints call
-# with legacy_forms=True, so the deep helpers need no extra argument.
+# Each parse_constraints or read_constraints call sets this to its legacy_forms value and
+# resets it when the call ends, so the deep helpers need no extra argument.
 _LEGACY_FORMS: ContextVar[bool] = ContextVar("openascent_legacy_forms", default=False)
 
 
@@ -2382,10 +2382,12 @@ def parse_constraints(
             under an older, lenient reader (SKY-760). ``True`` accepts each
             form that reader accepted, and gives the values that reader gave:
             a ``[setup] command`` or ``[metric] setup`` is stripped and may
-            hold line breaks and tabs; a path with spaces around it, a ``\\``
-            between folders or a ``/`` at the end is cleaned; each name of a
-            ``services`` list is stripped; a ``network`` host is put in lower
-            case; a part of a command ``entry`` may hold a control character;
+            hold any control character, such as a line break or a tab; a path
+            with spaces around it, a ``\\`` between folders or a ``/`` at the
+            end is cleaned; each name of a ``services`` list is stripped; a
+            ``network`` host is put in lower case; a command ``entry`` of
+            ``[run]``, ``[metric]`` or a target may hold a control character
+            (``[proposer]`` still refuses one);
             and a value that a list holds twice is dropped with no error, and
             the first stays. One difference from that reader is on purpose: a
             ``network`` entry must still be a public host, because the list
@@ -3372,9 +3374,10 @@ def _mcp_server(name: str, entry: Any, prefix: str) -> McpServer:
     # it matches in any case, as in the older reader. A type such as
     # "STDIO" still fails, but with the stdio advice, which says what to change.
     kind = entry.get("type", "http")
-    if _LEGACY_FORMS.get() and isinstance(kind, str):
-        kind = kind.lower()
-    if (isinstance(kind, str) and kind.lower() == "stdio") or _MCP_STDIO_KEYS & set(entry):
+    folded = kind.lower() if isinstance(kind, str) else None
+    if _LEGACY_FORMS.get() and folded is not None:
+        kind = folded
+    if folded == "stdio" or _MCP_STDIO_KEYS & set(entry):
         problems.add(
             f"{prefix}: {label} is a stdio server (command, args, env). Only http servers are"
             ' supported now; give it a "url" and put each secret in "headers" as ${NAME}.'

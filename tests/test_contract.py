@@ -4789,6 +4789,37 @@ def test_legacy_forms_end_with_the_call() -> None:
         parse_constraints(raw)
 
 
+def test_read_constraints_ends_legacy_forms_with_the_call(tmp_path: Path) -> None:
+    """read_constraints resets the option after a legacy call that succeeds or raises."""
+    (tmp_path / "good").mkdir()
+    (tmp_path / "bad").mkdir()
+    good = _archive(
+        tmp_path / "good", {CONSTRAINTS_FILE: _VALID_RUN + b'[paths]\neditable = ["src/"]\n'}
+    )
+    bad = _archive(
+        tmp_path / "bad", {CONSTRAINTS_FILE: _VALID_RUN + b'[paths]\neditable = ["/abs"]\n'}
+    )
+
+    read_constraints(good, legacy_forms=True)
+    with pytest.raises(ConstraintsError, match="must be written 'src'"):
+        read_constraints(good)
+
+    with pytest.raises(ConstraintsError):
+        read_constraints(bad, legacy_forms=True)
+    with pytest.raises(ConstraintsError, match="must be written 'src'"):
+        read_constraints(good)
+
+
+@pytest.mark.parametrize("key", ["entry", "setup"])
+def test_legacy_forms_still_refuse_a_control_character_in_a_proposer_command(key: str) -> None:
+    """With legacy_forms, [proposer] entry and setup still refuse a control character."""
+    entry = "" if key == "entry" else 'entry = ["node", "agent.js"]\n'
+    raw = _VALID_RUN + f'[proposer]\n{entry}{key} = ["node", "a\\tb"]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=rf"\[proposer\] {key} must be a command list"):
+        parse_constraints(raw, legacy_forms=True)
+
+
 def test_legacy_forms_give_the_same_proposal_for_a_file_in_its_one_form() -> None:
     """A file already in its one form reads the same with or without legacy_forms."""
     raw = _CFCA + _RUN
