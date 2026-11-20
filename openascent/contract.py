@@ -71,7 +71,7 @@ _MAX_NAME_CHARS = 100
 _MAX_HOSTS = 100
 _MAX_TABLES = 20
 _MAX_COMMAND_PARTS = 50
-# A runner's launch bridge fills these tokens with the proposer's relay key. A
+# A runner's launch bridge fills these tokens with the proposer's model key. A
 # command with one gets the key in its text, so the file's own commands cannot name
 # them. The two older names stay because a runner may still fill them.
 _KEY_TOKENS = ("__ASCENT_MODEL_KEY__", "__APP_API_KEY__", "__SKYNET_API_KEY__")
