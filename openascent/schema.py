@@ -12,6 +12,7 @@ import json
 from typing import Any
 
 from .contract import (
+    _CONTROL_CHARS,
     _MAX_COMMAND_CHARS,
     _MAX_COMMAND_PARTS,
     _MAX_HOSTS,
@@ -26,9 +27,16 @@ _ID = "https://raw.githubusercontent.com/Skynet-ml/openascent/main/ascent.schema
 _TABLE_NAME = "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
 _PATH = {"type": "string", "description": "A path inside the repository."}
 _PATHS = {"type": "array", "items": _PATH, "maxItems": _MAX_PATHS}
+# The parser refuses a control character in any command part, so the schema can too.
+_NO_CONTROL_CHARS = f"^[^{_CONTROL_CHARS.pattern[1:-1]}]*$"
 _COMMAND = {
     "type": "array",
-    "items": {"type": "string", "minLength": 1, "maxLength": _MAX_COMMAND_CHARS},
+    "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": _MAX_COMMAND_CHARS,
+        "pattern": _NO_CONTROL_CHARS,
+    },
     "minItems": 1,
     "maxItems": _MAX_COMMAND_PARTS,
 }
@@ -50,7 +58,7 @@ _ROLE = {
         "type": "array",
         "items": {"type": "string", "maxLength": 253},
         "maxItems": _MAX_HOSTS,
-        "description": "The host names the role can reach; [] for no network.",
+        "description": "The public host names the role can reach; [] for no network.",
     },
     "services": {
         "type": "array",
