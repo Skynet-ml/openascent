@@ -363,7 +363,7 @@ def test_a_proposer_entry_with_a_character_next_to_a_refused_range_is_kept(char:
 
 
 @pytest.mark.parametrize("key", ["entry", "setup"])
-@pytest.mark.parametrize("token", ["__APP_API_KEY__", "__SKYNET_API_KEY__"])
+@pytest.mark.parametrize("token", ["__ASCENT_MODEL_KEY__", "__APP_API_KEY__", "__SKYNET_API_KEY__"])
 def test_a_proposer_command_that_names_a_key_token_fails(key: str, token: str) -> None:
     """The setup check refuses a key token that the bridge would fill into the command text.
 
