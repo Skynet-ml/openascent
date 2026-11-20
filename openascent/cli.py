@@ -2,6 +2,9 @@
 
 ``ascent score --entry <entry> --input <file> [--timeout <seconds>]`` runs one
 metric call in the current directory and prints the checked answer as JSON.
+
+``ascent check --image --role <candidate|metric>`` checks that the current box
+can run components of that role and prints the report as JSON.
 """
 
 import argparse
@@ -12,6 +15,7 @@ import sys
 from pathlib import Path
 
 from .component import FunctionEntry, call_metric, parse_entry
+from .image_check import ROLES, check_image
 from .result import AscentError
 
 DEFAULT_TIMEOUT_S = 60.0
@@ -24,8 +28,8 @@ def main(argv: list[str] | None = None) -> int:
         argv: The arguments without the program name. ``None`` reads ``sys.argv``.
 
     Returns:
-        The exit code: 0 on success, 1 when the call fails. A usage error
-        exits with 2.
+        The exit code: 0 on success, 1 when the call or a check fails. A
+        usage error exits with 2.
     """
     parser = argparse.ArgumentParser(prog="ascent", description="Run OpenAscent components.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -44,7 +48,21 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_TIMEOUT_S,
         help=f"The time limit in seconds (default {DEFAULT_TIMEOUT_S:g}).",
     )
+    check = commands.add_parser(
+        "check", help="Check that the current box image speaks the protocol."
+    )
+    # SKY-759 adds a file argument to this command. With --image, check takes no file.
+    check.add_argument("--image", action="store_true", help="Check the current box, not a file.")
+    check.add_argument("--role", choices=ROLES, help="The role of the box (with --image).")
     args = parser.parse_args(argv)
+    if args.command == "check":
+        if not args.image:
+            check.error("give --image; check takes no other form yet")
+        if args.role is None:
+            check.error("--image needs --role candidate or --role metric")
+        report = check_image(args.role)
+        print(json.dumps(report))
+        return 0 if report["ok"] else 1
     try:
         entry = _entry(args.entry)
     except ValueError as error:
