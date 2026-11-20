@@ -4117,3 +4117,82 @@ def test_a_quoted_key_with_an_escape_gets_its_own_line() -> None:
     assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [
         (4, "run", "a\u202eb")
     ]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        b'[proposer]\nillegal = ".optimize/exploits/rules.md"\n',
+        b'[run]\nentry = ".optimize/exploits/run.py:main"\n',
+    ],
+    ids=["proposer-illegal", "run-entry"],
+)
+def test_an_invalid_exploits_gives_no_error_for_the_default_folder(extra: bytes) -> None:
+    """An invalid [metric] exploits does not hide the default folder from other settings."""
+    run = b"" if extra.startswith(b"[run]") else b'[run]\nentry = "run.py:main"\n'
+    raw = b"version = 1\n" + run + extra + b'[metric]\nexploits = "../mine/"\n'
+    assert [(section, key) for _, section, key, _ in _errors(raw)] == [("metric", "exploits")]
+
+
+def test_each_command_path_through_a_link_gets_its_own_error(tmp_path: Path) -> None:
+    """An entry and a setup that both go through a link give one error each."""
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n'
+        b'entry = ["node", "a.js"]\nsetup = ["sh", "b.sh"]\n'
+    )
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        info = tarfile.TarInfo(CONSTRAINTS_FILE)
+        info.size = len(raw)
+        packed.addfile(info, io.BytesIO(raw))
+        for name in ("a.js", "b.sh"):
+            info = tarfile.TarInfo(name)
+            info.type, info.linkname = tarfile.SYMTYPE, f"real/{name}"
+            packed.addfile(info)
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    assert [(d.line, d.section, d.key) for d in caught.value.errors] == [
+        (5, "proposer", "entry"),
+        (6, "proposer", "setup"),
+    ]
+
+
+def test_a_bad_mcp_server_does_not_skip_the_secret_receiver_check(tmp_path: Path) -> None:
+    """The valid servers of the MCP files stay, so a secret sent to two hosts is still found."""
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\nmcp = ".mcp.json"\n'
+        b'[proposer]\nentry = ["node", "a.js"]\nmcp = "agent/.mcp.json"\n'
+        b'[services.s]\nurl = "https://a.example.com"\nheaders = { X-Key = "${K}" }\n'
+    )
+    run = b'{"mcpServers": {"b": {"url": "https://b.example.com", "headers": {"X-Key": "${K}"}}}}'
+    proposer = b'{"mcpServers": {"p": {"type": "HTTP", "url": "https://p.example.com"}}}'
+    archive = _archive(
+        tmp_path,
+        {CONSTRAINTS_FILE: raw, "a.js": b"", ".mcp.json": run, "agent/.mcp.json": proposer},
+    )
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    errors = caught.value.errors
+    assert [(d.line, d.section, d.key) for d in errors] == [
+        (7, "proposer", "mcp"),
+        (4, "run", "mcp"),
+    ]
+    assert errors[1].message.startswith("ascent.toml: ${K} goes to")
+
+
+def test_a_unicode_line_separator_in_a_comment_does_not_move_a_later_line() -> None:
+    """TOML ends a line only at a newline, so U+2028 inside a comment starts no new line."""
+    raw = _VALID_RUN + "# a\u2028b\u2029c\x85d\ntimeout = -1\n".encode()
+    assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [
+        (5, "run", "timeout")
+    ]
+
+
+def test_a_quoted_key_with_an_escaped_quote_gets_its_own_line() -> None:
+    """A double-quoted key such as "a\\"b" does not end at its escaped quote."""
+    raw = _VALID_RUN + b'# one\n"a\\"b" = 1\n'
+    assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [(5, "run", 'a"b')]

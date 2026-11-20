@@ -275,7 +275,7 @@ class _Problems:
 # No two quantifiers can match the same text, so a hostile line takes linear time.
 _HEADER_LINE = re.compile(r"\s*\[([^\[\]]*)\]\s*(?:#.*)?")
 _ARRAY_LINE = re.compile(r"\s*\[\[([^\[\]]*)\]\]\s*(?:#.*)?")
-_KEY_LINE = re.compile(r"""\s*(?:"([^"]*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*[.=]""")
+_KEY_LINE = re.compile(r"""\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*[.=]""")
 
 
 def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
@@ -295,7 +295,7 @@ def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
     section: str | None = None
     # A value that goes on past its line: open brackets, and an open multi-line string.
     depth, open_string = 0, None
-    for number, line in enumerate(text.splitlines(), start=1):
+    for number, line in enumerate(text.split("\n"), start=1):
         if depth or open_string:
             depth, open_string = _value_state(line, 0, depth, open_string)
             continue
@@ -2426,9 +2426,14 @@ def parse_constraints(
         for path in (metric_role["illegal_file"], metric_role["mcp"])
         if path not in visible_paths
     ]
+    scoring = _scoring_paths(metric, cases_file)
+    # An invalid exploits falls back to the default folder, which the file did
+    # not name, so checking other paths against it would report a false error.
+    if any(error.section == "metric" and error.key == "exploits" for error in problems.errors):
+        scoring = tuple(path for path in scoring if path != metric.exploits)
     problems.check(
         _refuse_hidden_visible_files,
-        (CONSTRAINTS_FILE, *_scoring_paths(metric, cases_file)),
+        (CONSTRAINTS_FILE, *scoring),
         visible,
         run_entry,
         [path for path in metric_only if path is not None],
@@ -2542,10 +2547,8 @@ def read_constraints(
     constraints = parse_constraints(raw, require_version=require_version, limits=limits)
     # Each loader fills its own fields, so one that fails leaves the others valid input.
     problems = _Problems()
-    loaded = problems.check(_load_mcp_files, constraints, archive)
-    if loaded is not None:
-        constraints = loaded
-        problems.check(_check_secret_receivers, constraints.services, constraints.mcp_roles)
+    constraints = _load_mcp_files(constraints, archive, problems)
+    problems.check(_check_secret_receivers, constraints.services, constraints.mcp_roles)
     constraints = problems.check(_load_rule_files, constraints, archive, default=constraints)
     constraints = problems.check(_load_cases, constraints, archive, default=constraints)
     if compose_parser is not None:
@@ -2574,9 +2577,9 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
         The proposal with ``proposer_command_files`` filled, unchanged without an entry.
 
     Raises:
-        ConstraintsError: When an argument names a symbolic link of the
-            snapshot, a path inside a linked folder, or a folder that holds a
-            symbolic link at any depth.
+        ConstraintsError: With one error for each argument that names a
+            symbolic link of the snapshot, a path inside a linked folder, or a
+            folder that holds a symbolic link at any depth.
     """
     if constraints.proposer_entry is None:
         return constraints
@@ -2585,6 +2588,7 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
     files = {PurePosixPath(member.name) for member in members}
     links = {str(PurePosixPath(member.name)) for member in members if member.issym()}
     paths = {str(path) for file in files for path in (file, *file.parents)} - {"."}
+    problems = _Problems()
     named: list[str] = []
     for key, command in (
         ("entry", constraints.proposer_entry),
@@ -2605,26 +2609,29 @@ def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoCons
                 None,
             )
             if link is not None:
-                raise ConstraintsError(
+                problems.add(
                     f"{CONSTRAINTS_FILE}: [proposer] {key} names '{part}', which goes through the"
                     f" symbolic link '{link}'. Name the real path, so that no version can change"
                     " the proposer.",
                     section="proposer",
                     key=key,
                 )
+                continue
             # A named folder protects its paths, not the files that its links
             # point at, so a link anywhere inside it is refused too.
             inner = next((name for name in sorted(links) if name.startswith(f"{path}/")), None)
             if inner is not None:
-                raise ConstraintsError(
+                problems.add(
                     f"{CONSTRAINTS_FILE}: [proposer] {key} names the folder '{part}', which holds"
                     f" the symbolic link '{inner}'. Remove the link from the folder, so that no"
                     " version can change the proposer.",
                     section="proposer",
                     key=key,
                 )
+                continue
             if path in paths:
                 named.append(path)
+    problems.raise_any()
     return replace(constraints, proposer_command_files=tuple(dict.fromkeys(named)))
 
 
@@ -2946,28 +2953,29 @@ def _split_rules(text: str, setting: str, path: str) -> tuple[str, ...]:
     return tuple(joined)
 
 
-def _load_mcp_files(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
-    """Fill each role with the servers of the MCP file it names (E49).
+def _load_mcp_files(
+    constraints: RepoConstraints, archive: Path, problems: _Problems
+) -> RepoConstraints:
+    """Fill each role with the valid servers of the MCP file it names (E49).
 
     The files come from the same snapshot as the toml, so the servers a run
-    gets are the ones the setup check showed.
+    gets are the ones the setup check showed. A file that is missing, not a
+    regular text file, too large, or not a valid ``mcpServers`` file, and each
+    invalid server, records an error; the valid servers stay, so that the
+    secret receiver check still sees them.
 
     Args:
         constraints: The parsed proposal.
         archive: The repository tree as a gzip tar archive.
+        problems: Records each error.
 
     Returns:
         The proposal with each role's ``mcp_servers`` filled.
-
-    Raises:
-        ConstraintsError: When a named file is missing, not a regular text
-            file, too large, or not a valid ``mcpServers`` file.
     """
     wanted = {label: role for label, role in constraints.mcp_roles.items() if role.mcp is not None}
     if not wanted:
         return constraints
     servers: dict[str, tuple[McpServer, ...]] = {}
-    problems = _Problems()
     with tarfile.open(archive, "r:gz") as packed:
         members = {str(PurePosixPath(m.name)): m for m in packed.getmembers()}
         for label, role in wanted.items():
@@ -2975,9 +2983,8 @@ def _load_mcp_files(constraints: RepoConstraints, archive: Path) -> RepoConstrai
             text = problems.check(_read_text_file, packed, members.get(path), f"{label} mcp", path)
             if text is not None:
                 servers[label] = problems.check(
-                    _mcp_servers, text, f"{label} mcp", path, default=()
+                    _mcp_servers, text, f"{label} mcp", path, problems, default=()
                 )
-    problems.raise_any()
     return replace(
         constraints,
         proposer=replace(constraints.proposer, mcp_servers=servers.get("[proposer]", ())),
@@ -2990,7 +2997,7 @@ def _load_mcp_files(constraints: RepoConstraints, archive: Path) -> RepoConstrai
     )
 
 
-def _mcp_servers(text: str, setting: str, path: str) -> tuple[McpServer, ...]:
+def _mcp_servers(text: str, setting: str, path: str, problems: _Problems) -> tuple[McpServer, ...]:
     """Read a standard ``.mcp.json`` file: ``{"mcpServers": {<name>: <server>}}`` (E49).
 
     Each server is an http server (``type`` http, streamable-http or sse, or a
@@ -3002,13 +3009,14 @@ def _mcp_servers(text: str, setting: str, path: str) -> tuple[McpServer, ...]:
         text: The file's text.
         setting: The setting that names the file, such as ``[metric] mcp``.
         path: The file's repository path.
+        problems: Records the error of each server that has an unknown type or
+            key, or a value that breaks the url or secret rules.
 
     Returns:
-        The servers in file order.
+        The valid servers in file order.
 
     Raises:
-        ConstraintsError: When the file is not that shape, a server has an
-            unknown type or key, or a value breaks the url or secret rules.
+        ConstraintsError: When the file is not that shape.
     """
     prefix = f"{CONSTRAINTS_FILE}: {setting} file '{path}'"
     try:
@@ -3026,13 +3034,12 @@ def _mcp_servers(text: str, setting: str, path: str) -> tuple[McpServer, ...]:
             f"{prefix}: mcpServers must be an object of at most {_MAX_TABLES} servers.",
             **_at(setting),
         )
-    problems = _Problems()
-    servers = [problems.check(_mcp_server, name, entry, prefix) for name, entry in entries.items()]
+    found = _Problems()
+    servers = [found.check(_mcp_server, name, entry, prefix) for name, entry in entries.items()]
     # A server's errors name it inside the .mcp.json file;
     # the toml place to fix is the role's mcp setting.
-    problems.errors = [replace(error, **_at(setting)) for error in problems.errors]
-    problems.raise_any()
-    return tuple(servers)
+    problems.errors += [replace(error, **_at(setting)) for error in found.errors]
+    return tuple(server for server in servers if server is not None)
 
 
 def _mcp_server(name: str, entry: Any, prefix: str) -> McpServer:
