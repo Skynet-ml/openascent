@@ -6,6 +6,7 @@ import io
 import pickle
 import re
 import tarfile
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -3911,3 +3912,17 @@ def test_a_diagnostic_is_an_error_in_ascent_toml_by_default() -> None:
     assert Diagnostic(level=ERROR, message="m") == Diagnostic(
         level="error", file="ascent.toml", line=None, section=None, key=None, message="m"
     )
+
+
+def test_a_long_hostile_header_line_is_scanned_in_linear_time() -> None:
+    """A line like an unclosed header with long runs of spaces does not hang the line scan."""
+    # 30000 spaces on each side keep the file under the 64 KiB limit.
+    hostile = "[" + " " * 30000 + "x" + " " * 30000
+    raw = f'version = 1\n[run]\nentry = "run.py:main"\nvcpus = 3\nnote = """\n{hostile}\n"""\n'
+
+    start = time.monotonic()
+    with pytest.raises(ConstraintsError) as caught:
+        parse_constraints(raw.encode())
+
+    assert time.monotonic() - start < 1
+    assert {(e.line, e.key) for e in caught.value.errors} == {(4, "vcpus"), (5, "note")}

@@ -18,6 +18,7 @@ can run components of that role and prints the report as JSON.
 import argparse
 import json
 import math
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -36,6 +37,9 @@ from .result import AscentError
 from .schema import schema_text
 
 DEFAULT_TIMEOUT_S = 60.0
+
+# C0 and C1 controls, DEL, and the bidi embedding, override and isolate controls.
+_UNSAFE_CHARS = re.compile("[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -146,7 +150,8 @@ def _diagnostic_line(path: str, diagnostic: Diagnostic) -> str:
         diagnostic: The problem.
 
     Returns:
-        The line. The line number, section and key are left out when the problem has none.
+        The line, with each control character escaped. The line number,
+        section and key are left out when the problem has none.
     """
     place = path if diagnostic.line is None else f"{path}:{diagnostic.line}"
     setting = " ".join(
@@ -154,7 +159,23 @@ def _diagnostic_line(path: str, diagnostic: Diagnostic) -> str:
     )
     # The place is already at the start of the line, so the message does not repeat the file.
     message = diagnostic.message.removeprefix(f"{CONSTRAINTS_FILE}: ")
-    return ": ".join(part for part in (place, setting, diagnostic.level, message) if part)
+    line = ": ".join(part for part in (place, setting, diagnostic.level, message) if part)
+    # Keys and quoted values come from the file, so a control character could
+    # move the cursor or reorder the text in a terminal or a CI log.
+    return _UNSAFE_CHARS.sub(_escape, line)
+
+
+def _escape(match: re.Match[str]) -> str:
+    """Write one unsafe character as a visible escape, such as ``\\x1b`` or ``\\u202e``.
+
+    Args:
+        match: The match of one character.
+
+    Returns:
+        The escape.
+    """
+    code = ord(match.group())
+    return f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}"
 
 
 def _count(number: int, level: str) -> str:

@@ -1,6 +1,7 @@
 """Tests of ``ascent check <file>``, ``ascent schema`` and the committed ``ascent.schema.json``."""
 
 import json
+import re
 import tomllib
 import types
 from pathlib import Path
@@ -286,6 +287,22 @@ def test_check_counts_each_level_and_fails_only_on_an_error(
     lines = capsys.readouterr().out.splitlines()
     assert lines[:-1] == [f"{path}: {d.level}: problem {n}." for n, d in enumerate(found)]
     assert lines[-1] == count
+
+
+def test_check_escapes_control_and_bidi_characters_from_the_file(tmp_path, capsys):
+    """A key with ESC, a line separator or a bidi override prints them as escapes.
+
+    Args:
+        tmp_path: Scratch folder.
+        capsys: Captures the report.
+    """
+    raw = b'version = 1\n[run]\nentry = "run.py:main"\n"a\\u001bb\\u0085c\\u202ed" = 1\n'
+    path = _write(tmp_path, raw)
+
+    assert main(["check", path]) == 1
+    out = capsys.readouterr().out
+    assert re.search("[\x00-\x09\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", out) is None
+    assert "a\\x1bb\\x85c\\u202ed" in out
 
 
 def test_check_reports_a_timeout_too_large_for_a_float(tmp_path, capsys):

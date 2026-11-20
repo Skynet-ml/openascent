@@ -44,7 +44,7 @@ import tomllib
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import urlsplit
 
 CONSTRAINTS_FILE = "ascent.toml"
@@ -269,7 +269,8 @@ class _Problems:
 
 
 # A table header such as [target.planner]; [[name]] arrays are not contract sections.
-_HEADER_LINE = re.compile(r"\s*\[\s*([^\[\]]+?)\s*\]\s*(?:#.*)?")
+# No two quantifiers can match the same text, so a hostile line takes linear time.
+_HEADER_LINE = re.compile(r"\s*\[([^\[\]]*)\]\s*(?:#.*)?")
 _KEY_LINE = re.compile(r"""\s*(?:"([^"]*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*[.=]""")
 
 
@@ -290,7 +291,7 @@ def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
     section: str | None = None
     for number, line in enumerate(text.splitlines(), start=1):
         header = _HEADER_LINE.fullmatch(line)
-        if header is not None:
+        if header is not None and header.group(1).strip():
             section = ".".join(part.strip().strip("\"'") for part in header.group(1).split("."))
             headers.setdefault(section, number)
             continue
@@ -351,7 +352,14 @@ def _missing(section: Mapping[str, Any], key: str, valid: Collection[str]) -> bo
     return not any(difflib.get_close_matches(name, sorted(valid), n=1) == [key] for name in unknown)
 
 
-def _at(setting: str) -> dict[str, str | None]:
+class _Place(TypedDict):
+    """The ``section`` and ``key`` keyword arguments of :class:`ConstraintsError`."""
+
+    section: str | None
+    key: str | None
+
+
+def _at(setting: str) -> _Place:
     """Split a setting as errors name it, such as ``[target.planner] entry``, into section and key.
 
     Args:
@@ -1229,6 +1237,8 @@ def _target(
     entry = problems.check(_entry, section["entry"], label) if "entry" in section else None
     timeout = problems.check(_timeout, section, label, "openascent.call", limits)
     problems.raise_any()
+    # An absent or invalid entry recorded an error, so raise_any raised.
+    assert entry is not None
     return TargetStage(**role, entry=entry, vcpus=vcpus, timeout=timeout)
 
 
@@ -2914,6 +2924,8 @@ def _mcp_server(name: str, entry: Any, prefix: str) -> McpServer:
     )
     url = problems.check(_service_url, entry["url"], label, prefix) if "url" in entry else None
     problems.raise_any()
+    # An absent or invalid url recorded an error, so raise_any raised.
+    assert url is not None
     return McpServer(name=name, url=url, headers=headers)
 
 
@@ -3148,7 +3160,7 @@ def effective_environment(
         )
     notes: list[str] = []
     setup = approved_setup
-    if (approved_setup or "").strip():
+    if approved_setup is not None and approved_setup.strip():
         if constraints.setup_command and constraints.setup_command != approved_setup.strip():
             notes.append(f"The run's own setup command replaces the one in {CONSTRAINTS_FILE}.")
     else:
@@ -3158,7 +3170,7 @@ def effective_environment(
     elif use_file_proposer:
         notes.append(
             "The run uses the proposer command in the contract file:"
-            f" {shlex.join(constraints.proposer_entry)}"
+            f" {shlex.join(constraints.proposer_entry or ())}"
         )
     return RepoEnvironment(
         editable_paths=editable,
