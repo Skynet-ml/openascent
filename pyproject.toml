@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openascent"
-version = "0.4.0"
+version = "0.4.1"
 description = "Reference Python package of the OpenAscent standard: define a metric, the machine climbs it."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = []
@@ -15,6 +15,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Operating System :: POSIX",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 
@@ -35,7 +36,7 @@ include = ["openascent", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
