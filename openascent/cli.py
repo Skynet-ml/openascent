@@ -3,9 +3,11 @@
 ``ascent score --entry <entry> --input <file> [--timeout <seconds>]`` runs one
 metric call in the current directory and prints the checked answer as JSON.
 
-``ascent check <file>`` checks an ``ascent.toml`` contract and prints the
-report as JSON: ``ok``, and for an invalid file the error with its section and
-key. It checks the file alone; the runner checks the files that it names.
+``ascent check <file>`` checks an ``ascent.toml`` contract and prints one line
+for each problem: ``file:line``, the section and key, the level (``error`` or
+``warning``) and the message. A last line counts them, such as ``2 errors, 1
+warning``. It exits 1 when there is an error, and 0 with only warnings. It
+checks the file alone; the runner checks the files that it names.
 
 ``ascent check --image --role <candidate|metric>`` checks that the current box
 can run components of that role and prints the report as JSON.
@@ -16,17 +18,31 @@ can run components of that role and prints the report as JSON.
 import argparse
 import json
 import math
+import re
 import shlex
 import sys
 from pathlib import Path
 
 from .component import FunctionEntry, call_metric, parse_entry
-from .contract import ConstraintsError, parse_constraints
+from .contract import (
+    CONSTRAINTS_FILE,
+    ERROR,
+    WARNING,
+    ConstraintsError,
+    Diagnostic,
+    parse_constraints,
+)
 from .image_check import ROLES, check_image
 from .result import AscentError
 from .schema import schema_text
 
 DEFAULT_TIMEOUT_S = 60.0
+
+# C0 and C1 controls, DEL, the bidi marks, embeddings, overrides and isolates,
+# and the line and paragraph separators.
+_UNSAFE_CHARS = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]"
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -74,14 +90,21 @@ def main(argv: list[str] | None = None) -> int:
             if args.role is None:
                 check.error("--image needs --role candidate or --role metric")
             report = check_image(args.role)
-        elif args.file is None:
+            print(json.dumps(report))
+            return 0 if report["ok"] else 1
+        if args.file is None:
             check.error("give an ascent.toml file, or --image --role <role>")
-        elif args.role is not None:
+        if args.role is not None:
             check.error("--role needs --image")
-        else:
-            report = _check_file(check, args.file)
-        print(json.dumps(report))
-        return 0 if report["ok"] else 1
+        diagnostics, hidden = _check_file(check, args.file)
+        for diagnostic in diagnostics:
+            print(_diagnostic_line(args.file, diagnostic))
+        # The last line of a capped check counts the hidden errors and is no error itself.
+        errors = sum(diagnostic.level == ERROR for diagnostic in diagnostics)
+        errors += hidden - 1 if hidden else 0
+        warnings = sum(diagnostic.level == WARNING for diagnostic in diagnostics)
+        print(f"{_count(errors, ERROR)}, {_count(warnings, WARNING)}")
+        return 1 if errors else 0
     try:
         entry = _entry(args.entry)
     except ValueError as error:
@@ -104,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _check_file(check: argparse.ArgumentParser, path: str) -> dict[str, object]:
+def _check_file(check: argparse.ArgumentParser, path: str) -> tuple[list[Diagnostic], int]:
     """Check one ``ascent.toml`` file with the full parser.
 
     Args:
@@ -112,24 +135,66 @@ def _check_file(check: argparse.ArgumentParser, path: str) -> dict[str, object]:
         path: The path of the file.
 
     Returns:
-        The report: ``ok``, the file and, when the file is invalid, the error
-        with its section and key (``null`` when the error has none).
+        Every error and warning that the check shows, in the parser's order,
+        and the number of errors past the cap that it does not show.
     """
     try:
         raw = Path(path).read_bytes()
     except OSError as error:
         check.error(f"cannot read {path}: {error}")
     try:
-        parse_constraints(raw)
+        return list(parse_constraints(raw).warnings), 0
     except ConstraintsError as error:
-        return {
-            "ok": False,
-            "file": path,
-            "error": str(error),
-            "section": error.section,
-            "key": error.key,
-        }
-    return {"ok": True, "file": path}
+        return list(error.errors), error.hidden
+
+
+def _diagnostic_line(path: str, diagnostic: Diagnostic) -> str:
+    """Write one problem as ``file:line: [section] key: level: message``.
+
+    Args:
+        path: The checked file, as the command got it.
+        diagnostic: The problem.
+
+    Returns:
+        The line, with each control character escaped. The line number,
+        section and key are left out when the problem has none.
+    """
+    place = path if diagnostic.line is None else f"{path}:{diagnostic.line}"
+    setting = " ".join(
+        part for part in (diagnostic.section and f"[{diagnostic.section}]", diagnostic.key) if part
+    )
+    # The place is already at the start of the line, so the message does not repeat the file.
+    message = diagnostic.message.removeprefix(f"{CONSTRAINTS_FILE}: ")
+    line = ": ".join(part for part in (place, setting, diagnostic.level, message) if part)
+    # Keys and quoted values come from the file, so a control character could
+    # move the cursor or reorder the text in a terminal or a CI log.
+    return _UNSAFE_CHARS.sub(_escape, line)
+
+
+def _escape(match: re.Match[str]) -> str:
+    """Write one unsafe character as a visible escape, such as ``\\x1b`` or ``\\u202e``.
+
+    Args:
+        match: The match of one character.
+
+    Returns:
+        The escape.
+    """
+    code = ord(match.group())
+    return f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}"
+
+
+def _count(number: int, level: str) -> str:
+    """Write a count of one level, such as ``1 error`` or ``2 warnings``.
+
+    Args:
+        number: How many problems have the level.
+        level: ``error`` or ``warning``.
+
+    Returns:
+        The count with the level in the singular or the plural.
+    """
+    return f"{number} {level}" + ("" if number == 1 else "s")
 
 
 def _timeout(text: str) -> float:

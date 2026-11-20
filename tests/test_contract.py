@@ -6,6 +6,7 @@ import io
 import pickle
 import re
 import tarfile
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,7 +14,9 @@ import pytest
 
 from openascent.contract import (
     CONSTRAINTS_FILE,
+    ERROR,
     ConstraintsError,
+    Diagnostic,
     McpServer,
     MetricSpec,
     RepoConstraints,
@@ -21,8 +24,10 @@ from openascent.contract import (
     RunnerLimits,
     ServiceSpec,
     TargetStage,
+    _header_parts,
     _inside,
     _service_url,
+    _with_lines,
     effective_environment,
     instructions_brief,
     parse_constraints,
@@ -1272,6 +1277,13 @@ def test_a_toml_file_nested_too_deeply_fails_as_not_valid_toml() -> None:
     assert (caught.value.section, caught.value.key) == (None, None)
 
 
+def test_a_toml_syntax_error_has_the_line_of_the_error() -> None:
+    """A TOML syntax error is one diagnostic, at the line that tomllib names."""
+    with pytest.raises(ConstraintsError, match=r"^ascent\.toml is not valid TOML: ") as caught:
+        parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\ntimeout = \n')
+    assert [(d.line, d.section, d.key) for d in caught.value.errors] == [(4, None, None)]
+
+
 _V1_RUN = b"version = 1\n" + _RUN
 _STAGE = 'version = 1\n[target.solver]\nentry = "solver.py:solve"\n'
 
@@ -2460,9 +2472,8 @@ _STDIO_ROLES = {
         b'{"command": "npx", "args": ["files-mcp", "--token", "' + _RAW_KEY.encode() + b'"]}',
         b'{"type": "stdio", "command": "notes-mcp", "env": {"TOKEN": "${NOTES_TOKEN}"}}',
         b'{"url": "https://a.example.com/mcp", "env": {"TOKEN": "${NOTES_TOKEN}"}}',
-        b'{"type": "STDIO", "url": "https://a.example.com/mcp"}',
     ],
-    ids=["command", "type-stdio", "url-with-env", "type-stdio-upper"],
+    ids=["command", "type-stdio", "url-with-env"],
 )
 def test_a_stdio_mcp_server_in_any_role_is_refused(
     tmp_path: Path, role: str, server: bytes
@@ -2480,19 +2491,46 @@ def test_a_stdio_mcp_server_in_any_role_is_refused(
     assert _RAW_KEY not in str(error.value)
 
 
-@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP", "SSE"])
-def test_an_http_type_in_any_case_is_accepted(tmp_path: Path, kind: str) -> None:
-    """The MCP type is matched without case, so ``HTTP`` is an http server (E64)."""
-    raw = b'version = 1\n[run]\nentry = "a.py:f"\nmcp = "roles/.mcp.json"\n'
-    server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
-    files = {CONSTRAINTS_FILE: raw, "roles/.mcp.json": b'{"mcpServers": {"m": ' + server + b"}}"}
+_MCP_RUN = b'version = 1\n[run]\nentry = "a.py:f"\nmcp = "roles/.mcp.json"\n'
 
-    constraints = read_constraints(_archive(tmp_path, files))
+
+def _mcp_files(server: bytes) -> dict[str, bytes]:
+    """Return a snapshot whose ``[run]`` names an MCP file with the one server ``m``."""
+    return {
+        CONSTRAINTS_FILE: _MCP_RUN,
+        "roles/.mcp.json": b'{"mcpServers": {"m": ' + server + b"}}",
+    }
+
+
+@pytest.mark.parametrize("kind", ["http", "streamable-http", "sse"])
+def test_each_http_type_in_lower_case_is_accepted(tmp_path: Path, kind: str) -> None:
+    """The three MCP http types, written exactly, give an http server (E64)."""
+    server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
+
+    constraints = read_constraints(_archive(tmp_path, _mcp_files(server)))
 
     assert constraints is not None
     assert constraints.run_role.mcp_servers == (
         McpServer(name="m", url="https://a.example.com/mcp", headers={}),
     )
+
+
+@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP", "SSE", "STDIO"])
+def test_an_mcp_type_not_in_lower_case_names_the_server_and_the_three_types(
+    tmp_path: Path, kind: str
+) -> None:
+    """The parser does not convert the type, so ``HTTP`` and ``STDIO`` get the type error."""
+    server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
+
+    with pytest.raises(ConstraintsError) as error:
+        read_constraints(_archive(tmp_path, _mcp_files(server)))
+
+    assert str(error.value) == (
+        "ascent.toml: [run] mcp file 'roles/.mcp.json': server 'm' type must be http,"
+        " streamable-http or sse."
+    )
+    assert (error.value.section, error.value.key) == ("run", "mcp")
+    assert len(error.value.errors) == 1
 
 
 def test_a_uuid_key_in_a_service_header_is_refused() -> None:
@@ -3416,11 +3454,10 @@ def test_metric_scores_holds_at_most_the_name_cap() -> None:
     [
         (b"", None),
         (b'setup = "go build -o metric ./cmd/metric"\n', "go build -o metric ./cmd/metric"),
-        (b'setup = "  cargo build --release  "\n', "cargo build --release"),
     ],
 )
 def test_the_metric_setup_is_one_command_or_none(line: bytes, setup: str | None) -> None:
-    """``[metric] setup`` parses as one stripped command; without it, nothing builds (SKY-740)."""
+    """``[metric] setup`` parses as one command; without it, nothing builds (SKY-740)."""
     raw = b'version = 1\n[metric]\nfiles = ["eval"]\n' + line + b'[run]\nentry = "src/app.py:run"\n'
 
     assert parse_constraints(raw).metric.setup == setup
@@ -3506,10 +3543,10 @@ def test_every_role_refuses_a_private_network_host(label: str) -> None:
 
 
 def test_a_public_network_host_with_a_wildcard_or_a_port_is_kept() -> None:
-    """A public host passes with a ``*.`` prefix or a ``:port``, in lowercase (SKY-879)."""
+    """A public host passes with a ``*.`` prefix or a ``:port`` (SKY-879)."""
     raw = (
         b'version = 1\n[run]\nentry = "run.py:main"\n'
-        b'network = ["API.example.com", "*.example.com", "api.example.com:8443", "*.co.uk:443"]\n'
+        b'network = ["api.example.com", "*.example.com", "api.example.com:8443", "*.co.uk:443"]\n'
     )
 
     assert parse_constraints(raw).run_role.network == (
@@ -3566,14 +3603,14 @@ def test_a_setup_command_with_a_control_character_fails(
 
 
 @pytest.mark.parametrize("section", ["setup", "metric"])
-def test_a_setup_command_with_a_zwj_or_surrounding_newlines_is_kept(section: str) -> None:
-    """A ZWJ stays legal, and the newlines that strip removes do not fail (SKY-879).
+def test_a_setup_command_with_a_zwj_is_kept(section: str) -> None:
+    """A ZWJ stays legal in a setup command (SKY-879).
 
     Args:
         section: The table under test.
     """
     key = "command" if section == "setup" else "setup"
-    raw = f'version = 1\n[{section}]\n{key} = """\nnpm ci \\u200d\n"""\n'.encode() + _RUN
+    raw = f'version = 1\n[{section}]\n{key} = "npm ci \\u200d"\n'.encode() + _RUN
 
     constraints = parse_constraints(raw)
     command = constraints.setup_command if section == "setup" else constraints.metric.setup
@@ -3633,3 +3670,867 @@ def test_an_editable_compose_file_alone_leaves_nothing_to_change() -> None:
 
     with pytest.raises(ConstraintsError, match="protects every editable path"):
         effective_environment(constraints, approved_editable=["compose.yaml"], approved_setup=None)
+
+
+def _errors(raw: bytes) -> list[tuple[int | None, str | None, str | None, str]]:
+    """Parse ``raw``, which must fail, and return each error as (line, section, key, message).
+
+    Args:
+        raw: The ascent.toml bytes.
+
+    Returns:
+        The errors in the order of the check.
+    """
+    with pytest.raises(ConstraintsError) as error:
+        parse_constraints(raw)
+    assert all(d.level == ERROR and d.file == CONSTRAINTS_FILE for d in error.value.errors)
+    return [(d.line, d.section, d.key, d.message) for d in error.value.errors]
+
+
+def test_one_check_reports_a_mistake_in_each_of_three_sections() -> None:
+    """Three mistakes in three sections give three errors; the error itself is the first one."""
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\nvcpus = 3\n'
+        b'[paths]\neditable = ["src/"]\n[metrc]\n'
+    )
+
+    with pytest.raises(ConstraintsError) as error:
+        parse_constraints(raw)
+
+    assert [(d.line, d.section, d.key, d.message) for d in error.value.errors] == [
+        (
+            7,
+            "metrc",
+            None,
+            "ascent.toml: [metrc] is not a supported section. Did you mean 'metric'?",
+        ),
+        (
+            6,
+            "paths",
+            "editable",
+            "ascent.toml: 'src/' in [paths] editable must be written 'src': '/' between"
+            " folders, and no space or '/' at the start or the end.",
+        ),
+        (4, "run", "vcpus", "ascent.toml: [run] vcpus must be 1 or an even number from 2 to 32."),
+    ]
+    first = error.value.errors[0]
+    assert (str(error.value), error.value.section, error.value.key) == (
+        first.message,
+        first.section,
+        first.key,
+    )
+
+
+def test_one_check_reports_two_mistakes_in_one_section() -> None:
+    """Two bad values in ``[run]`` give two errors, each at the line of its key."""
+    raw = b'version = 1\n[run]\nentry = "run.py:main"\nvcpus = 3\ntimeout = -1\n'
+
+    assert _errors(raw) == [
+        (
+            5,
+            "run",
+            "timeout",
+            "ascent.toml: [run] timeout must be a positive number of seconds for each case.",
+        ),
+        (4, "run", "vcpus", "ascent.toml: [run] vcpus must be 1 or an even number from 2 to 32."),
+    ]
+
+
+def test_one_check_reports_a_section_mistake_and_a_rule_across_sections() -> None:
+    """A bad value in ``[metric]`` and a metric with nothing to judge are two errors."""
+    raw = b'version = 1\n[metric]\nentry = "m.py:score"\nvcpus = 3\n'
+
+    errors = _errors(raw)
+
+    assert [error[:3] for error in errors] == [(4, "metric", "vcpus"), (2, "metric", None)]
+    assert errors[1][3].startswith("ascent.toml: [metric] has nothing to judge.")
+
+
+def test_the_errors_come_in_the_same_order_every_time() -> None:
+    """The order of the errors depends only on the file, so two checks give the same list."""
+    raw = (
+        b'version = 1\n[zzz]\n[aaa]\n[run]\nentry = "run.py:main"\nvcpus = 3\n'
+        b"timeout = -1\nbeta = 1\nalpha = 2\n"
+    )
+
+    first = _errors(raw)
+
+    assert _errors(raw) == first
+    assert [error[1:3] for error in first] == [
+        ("zzz", None),
+        ("aaa", None),
+        ("run", "alpha"),
+        ("run", "beta"),
+        ("run", "timeout"),
+        ("run", "vcpus"),
+    ]
+
+
+def test_an_error_points_to_its_key_then_its_header_then_no_line() -> None:
+    """The line is the key's line; the header's line when the key is absent; else none."""
+    assert _errors(b"version = 1\n\n[run]\ntimeout = 5\n") == [
+        (
+            3,
+            "run",
+            "entry",
+            'ascent.toml: [run] entry is missing. Name the function ("path/to/file.py:function")'
+            ' or the command (["pytest", "-q"]) that runs the candidate for each case.',
+        )
+    ]
+    assert _errors(b'[run]\nentry = "run.py:main"\n') == [
+        (
+            None,
+            None,
+            "version",
+            "ascent.toml: version is missing. Put version = 1 at the top of the file, before any"
+            " section.",
+        )
+    ]
+
+
+def test_a_misspelled_key_gives_one_error_with_a_suggestion() -> None:
+    """``entri`` names the nearest key, and the missing ``entry`` is not a second error."""
+    raw = (
+        b'version = 1\n[target.plan]\nentri = "p.py:f"\n'
+        b'[services.maps]\nurl = "https://maps.example.com"\nheader = {}\n'
+    )
+
+    errors = _errors(raw)
+
+    assert [error[:3] for error in errors] == [
+        (6, "services.maps", "header"),
+        (3, "target.plan", "entri"),
+    ]
+    assert errors[0][3].endswith("Did you mean 'headers'?")
+    assert errors[1][3] == (
+        "ascent.toml: [target.plan] entri is not a supported setting. Did you mean 'entry'?"
+    )
+
+
+def test_a_service_with_a_bad_url_gives_no_error_in_the_role_that_uses_it() -> None:
+    """The role names a declared service, so only the service's own url fails."""
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\nservices = ["maps"]\n'
+        b'[services.maps]\nurl = "http://maps.example.com"\n'
+    )
+
+    assert _errors(raw) == [
+        (6, "services.maps", "url", "ascent.toml: [services.maps] url must be an https:// address.")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("setting", "message"),
+    [
+        (
+            b'[setup]\ncommand = " pip install x "\n',
+            "ascent.toml: [setup] command must not start or end with a space or a line break."
+            " Write 'pip install x'.",
+        ),
+        (
+            b'[paths]\neditable = ["src\\\\lib"]\n',
+            "ascent.toml: 'src\\lib' in [paths] editable must be written 'src/lib': '/' between"
+            " folders, and no space or '/' at the start or the end.",
+        ),
+        (
+            b'[paths]\neditable = [" src"]\n',
+            "ascent.toml: ' src' in [paths] editable must be written 'src': '/' between folders,"
+            " and no space or '/' at the start or the end.",
+        ),
+        (
+            b'[paths]\neditable = ["lib", "src", "lib"]\n',
+            "ascent.toml: [paths] editable holds 'lib' more than once. List each value once.",
+        ),
+        (
+            b'[proposer]\nentry = ["node", "agent.js"]\nnetwork = ["API.example.com"]\n',
+            "ascent.toml: [proposer] network entry 'API.example.com' must be in lower case. Write"
+            " 'api.example.com'.",
+        ),
+        (
+            b'[proposer]\nentry = ["node", "agent.js"]\n'
+            b'network = ["a.example.com", "a.example.com"]\n',
+            "ascent.toml: [proposer] network holds 'a.example.com' more than once. List each"
+            " value once.",
+        ),
+    ],
+    ids=["setup-spaces", "backslash", "leading-space", "duplicate-path", "upper-host", "dup-host"],
+)
+def test_a_value_not_in_its_one_form_is_refused(setting: bytes, message: str) -> None:
+    """The parser does not convert a value, so each other form fails and names the one form."""
+    raw = b'version = 1\n[run]\nentry = "run.py:main"\n' + setting
+
+    assert [error[3] for error in _errors(raw)] == [message]
+
+
+def test_a_bad_list_item_does_not_hide_a_duplicate() -> None:
+    """Each item of a list is checked, then the valid items are checked for duplicates."""
+    raw = b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["/x", "a", "a"]\n'
+
+    assert [error[3] for error in _errors(raw)] == [
+        "ascent.toml: '/x' in [paths] editable must be relative and stay inside the repository.",
+        "ascent.toml: [paths] editable holds 'a' more than once. List each value once.",
+    ]
+
+
+def test_reading_the_snapshot_reports_every_mistake_in_the_named_files(tmp_path: Path) -> None:
+    """A missing MCP file, two bad servers and a missing rule file give four errors."""
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\nmcp = "run/.mcp.json"\n'
+        b'[metric]\nillegal = "rules.md"\n[target.plan]\nentry = "p.py:f"\n'
+        b'mcp = "plan/.mcp.json"\n'
+    )
+    servers = (
+        b'{"mcpServers": {"a": {"type": "HTTP", "url": "https://a.example.com"},'
+        b' "b": {"urll": "https://b.example.com"}}}'
+    )
+
+    with pytest.raises(ConstraintsError) as error:
+        _read(tmp_path, raw, {"plan/.mcp.json": servers})
+
+    plan = "ascent.toml: [target.plan] mcp file 'plan/.mcp.json': server"
+    assert [(d.line, d.section, d.key, d.message) for d in error.value.errors] == [
+        (
+            4,
+            "run",
+            "mcp",
+            "ascent.toml: [run] mcp names 'run/.mcp.json', but the repository has no such file.",
+        ),
+        (9, "target.plan", "mcp", f"{plan} 'a' type must be http, streamable-http or sse."),
+        (
+            9,
+            "target.plan",
+            "mcp",
+            f"{plan} 'b' urll is not a supported setting for an http server. Did you mean 'url'?",
+        ),
+        (
+            6,
+            "metric",
+            "illegal",
+            "ascent.toml: [metric] illegal names 'rules.md', but the repository has no such file.",
+        ),
+    ]
+
+
+def test_a_valid_file_has_no_warnings() -> None:
+    """No check gives a warning yet, so a valid file gives none."""
+    assert parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n').warnings == ()
+
+
+def test_a_diagnostic_is_an_error_in_ascent_toml_by_default() -> None:
+    """A diagnostic names the contract file, and has no place until the check adds one."""
+    assert Diagnostic(level=ERROR, message="m") == Diagnostic(
+        level="error", file="ascent.toml", line=None, section=None, key=None, message="m"
+    )
+
+
+def test_a_long_hostile_header_line_is_scanned_in_linear_time() -> None:
+    """A line like an unclosed header with long runs of spaces does not hang the line scan."""
+    # 30000 spaces on each side keep the file under the 64 KiB limit.
+    hostile = "[" + " " * 30000 + "x" + " " * 30000
+    raw = f'version = 1\n[run]\nentry = "run.py:main"\nvcpus = 3\nnote = """\n{hostile}\n"""\n'
+
+    start = time.monotonic()
+    with pytest.raises(ConstraintsError) as caught:
+        parse_constraints(raw.encode())
+    # The scan skips a multi-line string, so the header patterns are timed on the line too.
+    assert _header_parts(hostile) is None
+    assert _header_parts("[" + hostile) is None
+
+    assert time.monotonic() - start < 1
+    assert {(e.line, e.key) for e in caught.value.errors} == {(4, "vcpus"), (5, "note")}
+
+
+_VALID_RUN = b'version = 1\n[run]\nentry = "run.py:main"\n'
+
+
+@pytest.mark.parametrize(
+    ("raw", "error"),
+    [
+        (
+            b'version = 1\n[rn]\nentry = "run.py:main"\n[metric]\nentry = "m.py:score"\n',
+            (2, "rn", None, "ascent.toml: [rn] is not a supported section. Did you mean 'run'?"),
+        ),
+        (
+            b'version = 1\n[targt.plan]\nentry = "p.py:plan"\n',
+            (
+                2,
+                "targt",
+                None,
+                "ascent.toml: [targt] is not a supported section. Did you mean 'target'?",
+            ),
+        ),
+        (
+            _VALID_RUN + b'services = ["maps"]\n[servics.maps]\nurl = "https://api.example.com"\n',
+            (
+                5,
+                "servics",
+                None,
+                "ascent.toml: [servics] is not a supported section. Did you mean 'services'?",
+            ),
+        ),
+    ],
+)
+def test_a_misspelled_section_gives_no_follow_on_error(raw: bytes, error: tuple) -> None:
+    """A misspelled [run], [target] or [services] table counts as present for later rules."""
+    assert _errors(raw) == [error]
+
+
+@pytest.mark.parametrize(
+    ("raw", "error"),
+    [
+        (
+            _VALID_RUN + b'[data]\ncase = "cases.jsonl"\n',
+            (
+                5,
+                "data",
+                "case",
+                "ascent.toml: [data] case is not a supported setting. Did you mean 'cases'?",
+            ),
+        ),
+        (
+            _VALID_RUN + b'[proposer]\nentri = ["node", "a.js"]\nsetup = ["npm", "ci"]\n',
+            (
+                5,
+                "proposer",
+                "entri",
+                "ascent.toml: [proposer] entri is not a supported setting. Did you mean 'entry'?",
+            ),
+        ),
+        (
+            b'versio = 1\n[run]\nentry = "run.py:main"\n',
+            (
+                1,
+                "versio",
+                None,
+                "ascent.toml: [versio] is not a supported section. Did you mean 'version'?",
+            ),
+        ),
+    ],
+)
+def test_a_misspelled_required_key_gives_no_missing_error(raw: bytes, error: tuple) -> None:
+    """A misspelled cases, proposer entry or version key gives one error that names the key."""
+    assert _errors(raw) == [error]
+
+
+@pytest.mark.parametrize(
+    ("raw", "line"),
+    [(_VALID_RUN + b"[[foo]]\nvcpus = 3\n", 4), (b"version = 1\nfoo = 1\n" + _RUN, 2)],
+    ids=["array", "value"],
+)
+def test_an_unknown_top_level_value_keeps_the_unknown_section_error(raw: bytes, line: int) -> None:
+    """foo = 1 and [[foo]] keep the text and place of an unknown section, so callers see no change.
+
+    The keys under [[foo]] do not count under [run].
+
+    Args:
+        raw: The ascent.toml bytes.
+        line: The line of foo.
+    """
+    assert _errors(raw) == [(line, "foo", None, "ascent.toml: [foo] is not a supported section.")]
+
+
+def test_proposer_setup_text_with_no_entry_also_needs_entry() -> None:
+    """A proposer setup of the wrong type still gets the error that it needs an entry."""
+    assert [message for *_, message in _errors(_VALID_RUN + b'[proposer]\nsetup = "npm ci"\n')] == [
+        'ascent.toml: [proposer] setup must be a command list such as ["node", "my-agent.js"].',
+        "ascent.toml: [proposer] setup needs [proposer] entry. setup prepares your own proposer"
+        " command; add entry, or remove setup to use the runner's own agent.",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("entry", "fixed"),
+    [
+        ("./run.py:main", "run.py:main"),
+        ("src\\\\run.py:main", "src/run.py:main"),
+        (" run.py:main", "run.py:main"),
+    ],
+)
+def test_an_entry_path_in_another_form_names_the_valid_form(entry: str, fixed: str) -> None:
+    """An entry path with ./, a backslash or a space at the start names its one valid form."""
+    raw = f'version = 1\n[run]\nentry = "{entry}"\n'.encode()
+    assert _errors(raw) == [
+        (
+            3,
+            "run",
+            "entry",
+            'ascent.toml: [run] entry must be "path/to/file.py:function" for a Python function,'
+            f' or a command list such as ["node", "planner.js"]. Write \'{fixed}\'.',
+        )
+    ]
+
+
+def test_an_entry_outside_the_repository_names_no_valid_form() -> None:
+    """An entry path that leaves the repository gets only the general entry error."""
+    message = _errors(b'version = 1\n[run]\nentry = "../run.py:main"\n')[0][3]
+    assert "Write" not in message
+
+
+def test_a_section_with_only_subtables_gets_the_line_of_its_first_subtable() -> None:
+    """An error on [metric] gets the line of [metric.scores] when there is no [metric] header."""
+    errors = _errors(b"version = 1\n[metric.scores]\nx = 1\n")
+    assert [(line, section) for line, section, *_ in errors if section == "metric"] == [
+        (2, "metric")
+    ]
+
+
+def test_the_write_hint_quotes_a_value_with_single_quotes() -> None:
+    """The text and host hints use single quotes, as the path hints do."""
+    raw = _VALID_RUN + b"[setup]\ncommand = \" echo 'hi'\"\n"
+    assert _errors(raw)[0][3].endswith("Write 'echo 'hi''.")
+    raw = _VALID_RUN + b'network = ["API.example.com"]\n'
+    assert _errors(raw)[0][3].endswith("Write 'api.example.com'.")
+
+
+def test_a_stage_with_an_error_still_gets_the_hidden_file_rule() -> None:
+    """A bad vcpus does not hide that the stage's illegal file is inside the hidden metric files."""
+    raw = (
+        b'version = 1\n[target.p]\nentry = "p.py:plan"\nvcpus = 3\nillegal = "m/rules.md"\n'
+        b'[metric]\nfiles = ["m"]\n'
+    )
+    assert [(line, key) for line, _, key, _ in _errors(raw)] == [(4, "vcpus"), (5, "illegal")]
+    assert "inside the hidden scoring files" in _errors(raw)[1][3]
+
+
+def test_a_service_with_an_error_still_gets_the_one_host_rule() -> None:
+    """A bad header name does not hide that a valid header sends a secret to a second host."""
+    raw = _VALID_RUN + (
+        b'[services.a]\nurl = "https://a.example.com"\n'
+        b'headers = { "bad name" = "x", X-Key = "${K}" }\n'
+        b'[services.b]\nurl = "https://b.example.com"\nheaders = { X-Key = "${K}" }\n'
+    )
+    assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [
+        (6, "services.a", "headers"),
+        (7, "services.b", None),
+    ]
+    assert _errors(raw)[1][3].startswith("ascent.toml: ${K} goes to a.example.com and")
+
+
+def test_a_service_with_a_bad_url_gives_no_second_host_error() -> None:
+    """A service whose url has an error is not a second host for its secret."""
+    raw = _VALID_RUN + (
+        b'[services.a]\nurl = "ftp://a.example.com"\nheaders = { X-Key = "${K}" }\n'
+        b'[services.b]\nurl = "https://b.example.com"\nheaders = { X-Key = "${K}" }\n'
+    )
+    assert [(section, key) for _, section, key, _ in _errors(raw)] == [("services.a", "url")]
+
+
+def test_a_line_inside_a_multi_line_value_is_not_a_header_or_a_key() -> None:
+    """Lines inside a multi-line array or string do not move the line of a later key."""
+    raw = (
+        b'version = 1\n[run]\nentry = [\n["x"]\n]\nnote = """\ntimeout = 1\n[metric]\n"""\n'
+        b"timeout = -1\n"
+    )
+    assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [
+        (6, "run", "note"),
+        (3, "run", "entry"),
+        (10, "run", "timeout"),
+    ]
+
+
+def test_a_quoted_key_with_an_escape_gets_its_own_line() -> None:
+    """A quoted key such as "a\\u202eb" is decoded before the scan looks up its line."""
+    raw = _VALID_RUN + b'"a\\u202eb" = 1\n'
+    assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [
+        (4, "run", "a\u202eb")
+    ]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        b'[proposer]\nillegal = ".optimize/exploits/rules.md"\n',
+        b'[run]\nentry = ".optimize/exploits/run.py:main"\n',
+    ],
+    ids=["proposer-illegal", "run-entry"],
+)
+def test_an_invalid_exploits_gives_no_error_for_the_default_folder(extra: bytes) -> None:
+    """An invalid [metric] exploits does not hide the default folder from other settings."""
+    run = b"" if extra.startswith(b"[run]") else b'[run]\nentry = "run.py:main"\n'
+    raw = b"version = 1\n" + run + extra + b'[metric]\nexploits = "../mine/"\n'
+    assert [(section, key) for _, section, key, _ in _errors(raw)] == [("metric", "exploits")]
+
+
+def test_each_command_path_through_a_link_gets_its_own_error(tmp_path: Path) -> None:
+    """An entry and a setup that both go through a link give one error each."""
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n'
+        b'entry = ["node", "a.js"]\nsetup = ["sh", "b.sh"]\n'
+    )
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        info = tarfile.TarInfo(CONSTRAINTS_FILE)
+        info.size = len(raw)
+        packed.addfile(info, io.BytesIO(raw))
+        for name in ("a.js", "b.sh"):
+            info = tarfile.TarInfo(name)
+            info.type, info.linkname = tarfile.SYMTYPE, f"real/{name}"
+            packed.addfile(info)
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    assert [(d.line, d.section, d.key) for d in caught.value.errors] == [
+        (5, "proposer", "entry"),
+        (6, "proposer", "setup"),
+    ]
+
+
+def test_a_bad_mcp_server_does_not_skip_the_secret_receiver_check(tmp_path: Path) -> None:
+    """The valid servers of the MCP files stay, so a secret sent to two hosts is still found."""
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\nmcp = ".mcp.json"\n'
+        b'[proposer]\nentry = ["node", "a.js"]\nmcp = "agent/.mcp.json"\n'
+        b'[services.s]\nurl = "https://a.example.com"\nheaders = { X-Key = "${K}" }\n'
+    )
+    run = b'{"mcpServers": {"b": {"url": "https://b.example.com", "headers": {"X-Key": "${K}"}}}}'
+    proposer = b'{"mcpServers": {"p": {"type": "HTTP", "url": "https://p.example.com"}}}'
+    archive = _archive(
+        tmp_path,
+        {CONSTRAINTS_FILE: raw, "a.js": b"", ".mcp.json": run, "agent/.mcp.json": proposer},
+    )
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    errors = caught.value.errors
+    assert [(d.line, d.section, d.key) for d in errors] == [
+        (7, "proposer", "mcp"),
+        (4, "run", "mcp"),
+    ]
+    assert errors[1].message.startswith("ascent.toml: ${K} goes to")
+
+
+def test_a_unicode_line_separator_in_a_comment_does_not_move_a_later_line() -> None:
+    """TOML ends a line only at a newline, so U+2028 inside a comment starts no new line."""
+    raw = _VALID_RUN + "# a\u2028b\u2029c\x85d\ntimeout = -1\n".encode()
+    assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [
+        (5, "run", "timeout")
+    ]
+
+
+def test_a_quoted_key_with_an_escaped_quote_gets_its_own_line() -> None:
+    """A double-quoted key such as "a\\"b" does not end at its escaped quote."""
+    raw = _VALID_RUN + b'# one\n"a\\"b" = 1\n'
+    assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [(5, "run", 'a"b')]
+
+
+def test_many_errors_under_many_subtable_parents_get_their_lines_fast() -> None:
+    """Each error finds the first subtable of its section with one lookup, not a scan of headers."""
+    text = _VALID_RUN.decode() + "".join(f"[{number}.y]\n" for number in range(9000))
+    errors = [
+        Diagnostic(level=ERROR, file=CONSTRAINTS_FILE, section=str(number), key=None, message="x")
+        for number in range(9000)
+    ]
+    started = time.perf_counter()
+    found = _with_lines(errors, text)
+    # The scan of every header for each error took about 1.9 s here.
+    assert time.perf_counter() - started < 0.3
+    assert [error.line for error in found[:2]] + [found[-1].line] == [4, 5, 9003]
+
+
+@pytest.mark.parametrize(
+    ("body", "error"),
+    [
+        (b'[outcome]\nrequire.acc = 0.9\nrequire.f1 = "x"\n', (6, "outcome.require", "f1")),
+        (b'[target]\nplan.entry = "p.py:f"\nplan.vcpus = 3\n', (6, "target.plan", "vcpus")),
+        (b'[target]\nplan.entry = "p.py:f"\n"plan" . \'vcpus\' = 3\n', (6, "target.plan", "vcpus")),
+    ],
+    ids=["require", "target", "quoted"],
+)
+def test_a_dotted_key_gets_the_line_of_its_last_part(body: bytes, error: tuple) -> None:
+    """require.f1 = "x" is the f1 key of [outcome.require], not the require key of [outcome].
+
+    Args:
+        body: The sections after [run].
+        error: The expected line, section and key.
+    """
+    assert [(line, section, key) for line, section, key, _ in _errors(_VALID_RUN + body)] == [error]
+
+
+def test_each_bad_line_of_the_cases_file_gets_its_own_error(tmp_path: Path) -> None:
+    """Two lines that are not cases give two errors, and no "holds no cases" error."""
+    raw = _VALID_RUN + b'[data]\ncases = "c.jsonl"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "c.jsonl": b"bad\nalso bad\n"})
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    assert [(d.line, d.message) for d in caught.value.errors] == [
+        (
+            5,
+            f"ascent.toml: line {number} of 'c.jsonl' ([data] cases) is not a case. Write each"
+            ' case on one line as a JSON object {"input": ..., "expected": ...}; "expected" is'
+            " optional.",
+        )
+        for number in (1, 2)
+    ]
+
+
+def test_a_cases_file_of_bad_lines_reports_only_the_first_hundred(tmp_path: Path) -> None:
+    """A large file of bad lines gives 100 line errors and one that says more are left out."""
+    raw = _VALID_RUN + b'[data]\ncases = "c.jsonl"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "c.jsonl": b"bad\n" * 5000})
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    errors = caught.value.errors
+    assert len(errors) == 101
+    assert "line 100 of" in errors[99].message
+    assert "more than 100 lines that are not cases" in errors[100].message
+
+
+def test_each_stray_line_of_a_rule_file_gets_its_own_error(tmp_path: Path) -> None:
+    """Two lines outside a bullet give two errors, and no "holds no rules" error."""
+    raw = _VALID_RUN + b'illegal = "r.md"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "r.md": b"stray one\n\nstray two\n"})
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    assert [(d.line, d.section, d.key) for d in caught.value.errors] == [(4, "run", "illegal")] * 2
+    assert ["line 1 of" in d.message for d in caught.value.errors] == [True, False]
+    assert "line 3 of" in caught.value.errors[1].message
+
+
+def test_a_bad_mcp_file_that_two_roles_name_gets_one_error(tmp_path: Path) -> None:
+    """A shared MCP file is read once, so its error appears once, at the first setting."""
+    raw = (
+        b'version = 1\n[proposer]\nentry = ["node", "a.js"]\nmcp = ".mcp.json"\n'
+        b'[run]\nentry = "run.py:main"\nmcp = ".mcp.json"\n'
+    )
+    mcp = b'{"mcpServers": {"m": {"type": "HTTP", "url": "https://a.example.com/mcp"}}}'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "a.js": b"", ".mcp.json": mcp})
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    assert [(d.line, d.section, d.key) for d in caught.value.errors] == [(4, "proposer", "mcp")]
+
+
+def test_a_good_mcp_file_that_two_roles_name_gives_both_its_servers(tmp_path: Path) -> None:
+    """Each role that names a shared MCP file gets its servers."""
+    raw = (
+        b'version = 1\n[proposer]\nentry = ["node", "a.js"]\nmcp = ".mcp.json"\n'
+        b'[run]\nentry = "run.py:main"\nmcp = ".mcp.json"\n'
+    )
+    mcp = b'{"mcpServers": {"m": {"url": "https://a.example.com/mcp"}}}'
+    constraints = read_constraints(
+        _archive(tmp_path, {CONSTRAINTS_FILE: raw, "a.js": b"", ".mcp.json": mcp})
+    )
+    assert constraints is not None
+
+    assert constraints.proposer.mcp_servers == constraints.run_role.mcp_servers
+    assert [server.name for server in constraints.run_role.mcp_servers] == ["m"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\nprotected = [".", "b/"]\n',
+            [
+                (5, "paths", "protected", "'b/' in [paths] protected must be written 'b'"),
+                (5, "paths", "protected", "[paths] protected cannot protect the whole repository."),
+            ],
+        ),
+        (
+            _VALID_RUN + b'[metric]\nfiles = [".", "x/"]\n',
+            [
+                (5, "metric", "files", "'x/' in [metric] files must be written 'x'"),
+                (4, "metric", None, "[metric] cannot name the whole repository."),
+            ],
+        ),
+        (
+            _VALID_RUN + b'services = ["nope", 5]\n',
+            [
+                (4, "run", "services", "[run] services must be text of 1 to 100 characters."),
+                (4, "run", "services", "[run] services names 'nope', but the file has no"),
+            ],
+        ),
+        (
+            b'version = 1\n[run]\nentry = ["metric/x.sh"]\ntimeout = -1\n'
+            b'[metric]\nfiles = ["metric"]\n',
+            [
+                (4, "run", "timeout", "[run] timeout must be a positive number"),
+                (3, "run", "entry", "[run] entry names 'metric/x.sh', which is inside the hidden"),
+            ],
+        ),
+        (
+            _VALID_RUN + b'network = ["10.0.0.1", "a.com", "a.com"]\n',
+            [
+                (4, "run", "network", "[run] network entry '10.0.0.1' must name a public host"),
+                (4, "run", "network", "[run] network holds 'a.com' more than once."),
+            ],
+        ),
+    ],
+    ids=["protected", "metric-files", "services", "run-timeout", "network"],
+)
+def test_one_bad_list_item_hides_no_check_of_the_other_items(
+    raw: bytes, expected: list[tuple[int, str, str | None, str]]
+) -> None:
+    """A bad item or a bad timeout keeps the valid values, so their own checks still run."""
+    errors = _errors(raw)
+
+    assert [(line, section, key) for line, section, key, _ in errors] == [
+        (line, section, key) for line, section, key, _ in expected
+    ]
+    assert all(part in message for (*_, message), (*_, part) in zip(errors, expected, strict=True))
+
+
+def test_a_list_of_only_bad_editable_paths_gets_no_empty_list_error() -> None:
+    """Every path of editable is bad, so each path gets its error and the list no second one."""
+    errors = _errors(_VALID_RUN + b'[paths]\neditable = ["a/", "/b"]\n')
+
+    assert [(line, key) for line, _, key, _ in errors] == [(5, "editable"), (5, "editable")]
+    assert not any("is empty" in message for *_, message in errors)
+
+
+def test_a_version_table_gets_only_the_type_error() -> None:
+    """[version] is a version of the wrong type, not a missing version."""
+    assert _errors(b'[version]\n[run]\nentry = "run.py:main"\n') == [
+        (1, None, "version", "ascent.toml: version {} is not supported; use version = 1.")
+    ]
+
+
+def test_a_quoted_header_part_with_a_bracket_keeps_its_lines() -> None:
+    """A header such as [target."a]b"] is read with its quotes, so its keys keep their section."""
+    errors = _errors(_VALID_RUN + b'[target."a]b"]\nentry = "s.py:main"\nvcpus = 3\n')
+
+    assert [(line, section, key) for line, section, key, _ in errors] == [
+        (4, "target.a]b", None),
+        (6, "target.a]b", "vcpus"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "line",
+    ['[target."a]b"', '[target."a]b"] x', '[[target."a]b"]', '["a" "b"]', "[ ]"],
+)
+def test_a_line_that_only_looks_like_a_header_is_no_header(line: str) -> None:
+    """A header must close, and only a comment may follow it."""
+    assert _header_parts(line) is None
+
+
+def test_a_header_line_gives_its_decoded_parts() -> None:
+    """Quoted parts are decoded, and a [[name]] array is a header too."""
+    assert _header_parts(' [ target . "a]b" ] # note') == ["target", "a]b"]
+    assert _header_parts("[[tool.x]]") == ["tool", "x"]
+    assert _header_parts('["a\\u0062"]') == ["ab"]
+
+
+def test_a_rule_file_of_many_bad_lines_reports_only_the_first_ones(tmp_path: Path) -> None:
+    """A rule file of 300 stray lines gives 100 line errors and one error that says so."""
+    raw = _VALID_RUN + b'illegal = "r.md"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "r.md": b"x\n" * 300})
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    messages = [d.message for d in caught.value.errors]
+    assert len(messages) == 101
+    assert all("is not part of a top-level bullet" in message for message in messages[:100])
+    assert messages[-1] == (
+        "ascent.toml: 'r.md' ([run] illegal) has more than 100 errors; only the first 100 are"
+        " shown."
+    )
+
+
+def test_one_check_reports_at_most_500_errors(tmp_path: Path) -> None:
+    """Six rule files of bad lines give 606 errors; the check shows 500 and counts the rest."""
+    raw = (
+        _VALID_RUN
+        + b'illegal = "r0.md"\n'
+        + b"".join(
+            f'[target.s{n}]\nentry = "s.py:main"\nillegal = "r{n}.md"\n'.encode()
+            for n in range(1, 6)
+        )
+    )
+    files = {CONSTRAINTS_FILE: raw} | {f"r{n}.md": b"x\n" * 300 for n in range(6)}
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(_archive(tmp_path, files))
+
+    errors = caught.value.errors
+    assert len(errors) == 501
+    assert errors[-1] == Diagnostic(
+        level=ERROR,
+        message="ascent.toml: 106 more errors are not shown. Fix the errors above and check again.",
+    )
+
+
+def test_the_named_files_are_checked_only_when_ascent_toml_has_no_error(tmp_path: Path) -> None:
+    """With an error in ascent.toml, a missing rule file gets no error until the file is fixed."""
+    raw = _VALID_RUN + b'illegal = "missing.md"\nvcpus = 3\n'
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw}))
+    assert [(d.line, d.key) for d in caught.value.errors] == [(5, "vcpus")]
+
+    fixed = _VALID_RUN + b'illegal = "missing.md"\n'
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: fixed}))
+    assert [(d.line, d.key) for d in caught.value.errors] == [(4, "illegal")]
+
+
+def test_a_repeated_metric_file_does_not_skip_the_entry_check() -> None:
+    """A repeated path is a valid path, so a command entry that runs no metric file still fails."""
+    raw = _VALID_RUN + b'[metric]\nfiles = ["m.sh", "m.sh"]\nentry = ["bash", "x.sh"]\n'
+
+    errors = _errors(raw)
+
+    assert [(line, key) for line, _, key, _ in errors] == [(5, "files"), (6, "entry")]
+    assert "[metric] files holds 'm.sh' more than once." in errors[0][3]
+    assert "[metric] entry ['bash', 'x.sh'] runs no file from [metric] files." in errors[1][3]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            b'version = 1\nservices = 1\n[run]\nentry = "run.py:main"\nservices = ["maps"]\n',
+            (2, None, "services", "ascent.toml: services must be a [services] table."),
+        ),
+        (
+            b'version = 1\nservics = 1\n[run]\nentry = "run.py:main"\nservices = ["maps"]\n',
+            (
+                2,
+                "servics",
+                None,
+                "ascent.toml: [servics] is not a supported section. Did you mean 'services'?",
+            ),
+        ),
+        (
+            b'version = 1\nrn = 1\n[metric]\nfiles = ["m.py"]\n',
+            (2, "rn", None, "ascent.toml: [rn] is not a supported section. Did you mean 'run'?"),
+        ),
+        (
+            b'version = 1\ntargt = 1\n[metric]\nfiles = ["m.py"]\n',
+            (
+                2,
+                "targt",
+                None,
+                "ascent.toml: [targt] is not a supported section. Did you mean 'target'?",
+            ),
+        ),
+        (
+            b'version = 1\ntarget = 1\n[metric]\nfiles = ["m.py"]\n',
+            (2, None, "target", "ascent.toml: target must be a [target] table."),
+        ),
+        (
+            b'version = 1\nrun = 1\n[metric]\nfiles = ["m.py"]\n',
+            (2, None, "run", "ascent.toml: run must be a [run] table."),
+        ),
+        (
+            b'version = 1\ndata = 1\n[run]\nentry = "run.py:main"\n[metric]\nfiles = ["m.py"]\n',
+            (2, None, "data", "ascent.toml: data must be a [data] table."),
+        ),
+    ],
+    ids=["services", "servics", "rn", "targt", "target", "run", "data"],
+)
+def test_a_section_that_is_not_a_table_gives_no_follow_on_error(
+    raw: bytes, expected: tuple[int, str | None, str | None, str]
+) -> None:
+    """A top-level value that is not a table gets its own error, and the rules that read it none."""
+    assert _errors(raw) == [expected]

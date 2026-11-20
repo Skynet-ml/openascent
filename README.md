@@ -218,7 +218,17 @@ The module `openascent.contract` reads and checks `ascent.toml`. It uses only th
 
 - `parse_constraints(raw)` reads the bytes of the file and returns the checked contract, a `RepoConstraints`.
 - `read_constraints(archive)` reads the file from a repository archive (a gzip tar file). It also checks the files that the contract names: the instructions and rule files, the `.mcp.json` files and the `[data] cases` file.
-- An invalid file raises `ConstraintsError`. The error text says what is wrong and how to fix it. `error.section` and `error.key` name the place, for example `"metric"` and `"entry"`. Each is `None` when the error has no such place.
+- An invalid file raises `ConstraintsError`. One check finds every mistake in the file. `error.errors` holds them all, in a fixed order, as `Diagnostic` values.
+- Each `Diagnostic` has a `level` (`"error"` or `"warning"`), a `file`, a `line`, a `section`, a `key` and a `message`. The message says what is wrong and how to fix it.
+- `line` is the line of the key. When the key is not in the file, it is the line of the section header. When the section is not in the file either, it is `None`.
+- A TOML syntax error has the line of the error.
+- The text of the error, `error.section` and `error.key` are those of the first diagnostic, for example `"metric"` and `"entry"`. Each is `None` when the error has no such place.
+- Only a file that is too large, or that is not valid TOML, stops the check at the first error.
+- `read_constraints` checks the named files only when `ascent.toml` itself has no error. When `ascent.toml` has an error, the error lists only the mistakes of `ascent.toml`. Fix them, then check again to see the mistakes of the named files.
+- A rule file or a `[data] cases` file reports only its first 100 mistakes, and one more diagnostic says so.
+- One error lists at most 500 diagnostics. When there are more, one last diagnostic counts the ones that are not shown, and `error.hidden` holds that number. The count line of `ascent check` gives the full number of errors.
+- A valid file has its warnings in `contract.warnings`. No check gives a warning yet.
+- The parser does not convert a value. A value in another form fails, and the error gives the one valid form. For example, `"src/"` must be `"src"`, a host must be in lower case, and a list holds each value once.
 
 The runner gives its own limits as a `RunnerLimits`: the most vCPUs of a box (default 32) and the longest `timeout` of `[run]` and of a stage (default: no maximum).
 The defaults are the limits of the Skynet runner.
@@ -236,18 +246,18 @@ It raises `ValueError` to refuse the file, and the package turns that into a `Co
 
 ### The `ascent check <file>` command
 
-`ascent check ascent.toml` checks one contract file with the full parser and prints a JSON report on stdout.
-It exits with code 0 when the file is valid:
+`ascent check ascent.toml` checks one contract file with the full parser.
+It prints one line on stdout for each mistake: `file:line`, the section and key, the level and the message.
+A last line counts the errors and the warnings:
 
-```json
-{"ok": true, "file": "ascent.toml"}
+```text
+ascent.toml:7: [metrc]: error: [metrc] is not a supported section. Did you mean 'metric'?
+ascent.toml:6: [paths] editable: error: 'src/' in [paths] editable must be written 'src': '/' between folders, and no space or '/' at the start or the end.
+ascent.toml:4: [run] vcpus: error: [run] vcpus must be 1 or an even number from 2 to 32.
+3 errors, 0 warnings
 ```
 
-It exits with code 1 when the file is invalid. The report gives the error, its section and its key (`null` when the error has none):
-
-```json
-{"ok": false, "file": "ascent.toml", "error": "ascent.toml: [metric] direction must be \"maximize\" or \"minimize\".", "section": "metric", "key": "direction"}
-```
+It exits with code 1 when there is an error. It exits with code 0 when there is no error, also when there are warnings. A valid file prints only `0 errors, 0 warnings`.
 
 A file that the command cannot read is a usage error with exit code 2.
 The command checks the file alone. The files that the contract names are not checked, because the command has no repository archive. `read_constraints` checks them.
