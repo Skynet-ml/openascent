@@ -211,7 +211,9 @@ def _check_import(python: str) -> dict:
     name = "package_import"
     if not python:
         return _result(name, False, "The path of the Python runtime is unknown.")
-    ok, out = _run([python, "-c", "import openascent; print(openascent.__version__)"])
+    # -P keeps the current directory off sys.path, so a local openascent folder
+    # cannot hide the installed package.
+    ok, out = _run([python, "-P", "-c", "import openascent; print(openascent.__version__)"])
     if not ok:
         return _result(name, False, out)
     version = out.strip()

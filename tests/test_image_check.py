@@ -198,6 +198,19 @@ def test_missing_package_fails(tmp_path):
     assert "No module named openascent" in report["checks"][1]["message"]
 
 
+def test_import_check_ignores_a_local_package(tmp_path, monkeypatch):
+    """A local openascent folder in the current directory does not hide the installed package."""
+    local = tmp_path / "openascent"
+    local.mkdir()
+    (local / "__init__.py").write_text('__version__ = "9"\n')
+    monkeypatch.chdir(tmp_path)
+    report = check_image("candidate", python=PY, ascent=ascent_on_path())
+    entry = report["checks"][1]
+    assert entry["name"] == "package_import"
+    assert entry["ok"], entry
+    assert entry["message"] == f"{PY} imports openascent {openascent.__version__}."
+
+
 def test_other_package_version_fails(tmp_path):
     """A runtime that imports another version of the package fails the import check."""
     runtime = fake(tmp_path, "python3", "echo 9.9.9\n")
