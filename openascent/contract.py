@@ -71,9 +71,10 @@ _MAX_NAME_CHARS = 100
 _MAX_HOSTS = 100
 _MAX_TABLES = 20
 _MAX_COMMAND_PARTS = 50
-# harness_bridge's gateway key tokens. A launch command with one gets the
-# proposer's relay key in its text, so the file's own commands cannot name them.
-_KEY_TOKENS = ("__APP_API_KEY__", "__SKYNET_API_KEY__")
+# A runner's launch bridge fills these tokens with the proposer's model key. A
+# command with one gets the key in its text, so the file's own commands cannot name
+# them. The two older names stay because a runner may still fill them.
+_KEY_TOKENS = ("__ASCENT_MODEL_KEY__", "__APP_API_KEY__", "__SKYNET_API_KEY__")
 # Popen raises ValueError on a NUL byte, outside the setup check's clear error, and
 # other control characters only hide what the command does. That covers the C1
 # controls and the bidi embeddings, overrides, isolates and marks, which reorder the
@@ -1423,7 +1424,7 @@ def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...
     if token is not None:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} {key} cannot contain {token}. The command reads the model"
-            " key from the APP_API_KEY environment variable.",
+            " key from the ASCENT_MODEL_KEY environment variable.",
             **_at(f"{label} {key}"),
         )
     return tuple(value)

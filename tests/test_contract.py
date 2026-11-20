@@ -363,7 +363,7 @@ def test_a_proposer_entry_with_a_character_next_to_a_refused_range_is_kept(char:
 
 
 @pytest.mark.parametrize("key", ["entry", "setup"])
-@pytest.mark.parametrize("token", ["__APP_API_KEY__", "__SKYNET_API_KEY__"])
+@pytest.mark.parametrize("token", ["__ASCENT_MODEL_KEY__", "__APP_API_KEY__", "__SKYNET_API_KEY__"])
 def test_a_proposer_command_that_names_a_key_token_fails(key: str, token: str) -> None:
     """The setup check refuses a key token that the bridge would fill into the command text.
 
@@ -382,6 +382,7 @@ def test_a_proposer_command_that_names_a_key_token_fails(key: str, token: str) -
     ) as caught:
         parse_constraints(raw)
     assert (caught.value.section, caught.value.key) == ("proposer", key)
+    assert "ASCENT_MODEL_KEY environment variable" in str(caught.value)
 
 
 def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: Path) -> None:
