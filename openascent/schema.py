@@ -22,7 +22,7 @@ from .contract import (
     DIRECTIONS,
 )
 
-_ID = "https://github.com/Skynet-ml/openascent/blob/main/ascent.schema.json"
+_ID = "https://raw.githubusercontent.com/Skynet-ml/openascent/main/ascent.schema.json"
 _TABLE_NAME = "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
 _PATH = {"type": "string", "description": "A path inside the repository."}
 _PATHS = {"type": "array", "items": _PATH, "maxItems": _MAX_PATHS}

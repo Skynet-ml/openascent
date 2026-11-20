@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/Skynet-ml/openascent/blob/main/ascent.schema.json",
+  "$id": "https://raw.githubusercontent.com/Skynet-ml/openascent/main/ascent.schema.json",
   "title": "OpenAscent contract (ascent.toml), version 1",
   "description": "The sections, keys and value types of ascent.toml. The schema cannot hold the rules across sections, such as 'a [metric] needs a [run] or a stage', or the rules on the files the contract names. ascent check is the full check.",
   "type": "object",
