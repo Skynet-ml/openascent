@@ -2515,11 +2515,11 @@ def test_each_http_type_in_lower_case_is_accepted(tmp_path: Path, kind: str) -> 
     )
 
 
-@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP", "SSE", "STDIO"])
+@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP", "SSE"])
 def test_an_mcp_type_not_in_lower_case_names_the_server_and_the_three_types(
     tmp_path: Path, kind: str
 ) -> None:
-    """The parser does not convert the type, so ``HTTP`` and ``STDIO`` get the type error."""
+    """The parser does not convert the type, so ``HTTP`` gets the type error."""
     server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
 
     with pytest.raises(ConstraintsError) as error:
@@ -4534,3 +4534,133 @@ def test_a_section_that_is_not_a_table_gives_no_follow_on_error(
 ) -> None:
     """A top-level value that is not a table gets its own error, and the rules that read it none."""
     assert _errors(raw) == [expected]
+
+
+@pytest.mark.parametrize("kind", ["STDIO", "Stdio"])
+def test_a_stdio_type_in_any_case_gets_the_stdio_advice(tmp_path: Path, kind: str) -> None:
+    """A stdio type not in lower case still fails, with the advice for a stdio server."""
+    server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
+
+    for legacy_forms in (False, True):
+        with pytest.raises(ConstraintsError) as error:
+            read_constraints(_archive(tmp_path, _mcp_files(server)), legacy_forms=legacy_forms)
+
+        assert str(error.value) == (
+            "ascent.toml: [run] mcp file 'roles/.mcp.json': server 'm' is a stdio server (command,"
+            ' args, env). Only http servers are supported now; give it a "url" and put each'
+            ' secret in "headers" as ${NAME}.'
+        )
+        assert len(error.value.errors) == 1
+
+
+# Each form that the older Skynet reader accepted and normalized (SKY-760): the
+# ascent.toml text after the [run] section, and the field it fills.
+_LEGACY = {
+    "setup-spaces": (b'[setup]\ncommand = "  pip install x  "\n', "setup_command", "pip install x"),
+    "setup-line-break": (
+        b'[setup]\ncommand = "pip install x\\n"\n',
+        "setup_command",
+        "pip install x",
+    ),
+    "metric-setup": (b'[metric]\nsetup = " make "\n', "metric.setup", "make"),
+    "path-spaces": (b'[paths]\neditable = [" src "]\n', "editable_paths", ("src",)),
+    "path-backslash": (b'[paths]\neditable = ["src\\\\a"]\n', "editable_paths", ("src/a",)),
+    "path-trailing-slash": (b'[paths]\neditable = ["src/"]\n', "editable_paths", ("src",)),
+    "protected-trailing-slash": (
+        b'[paths]\nprotected = ["eval/"]\n',
+        "protected_paths",
+        ("eval",),
+    ),
+    "metric-files-trailing-slash": (
+        b'[metric]\nfiles = ["scoring/"]\n',
+        "metric.files",
+        ("scoring",),
+    ),
+    "upper-host": (b'network = ["API.Example.com"]\n', "run_role.network", ("api.example.com",)),
+}
+
+
+def _field(constraints: RepoConstraints, name: str) -> object:
+    """Return a field of the proposal named by a dotted path, such as ``metric.setup``."""
+    value: object = constraints
+    for part in name.split("."):
+        value = getattr(value, part)
+    return value
+
+
+@pytest.mark.parametrize("form", sorted(_LEGACY))
+def test_legacy_forms_normalize_each_old_form(form: str) -> None:
+    """With legacy_forms, each old form is read the way the older reader normalized it."""
+    setting, name, expected = _LEGACY[form]
+    raw = _VALID_RUN + setting
+
+    assert _field(parse_constraints(raw, legacy_forms=True), name) == expected
+
+
+@pytest.mark.parametrize("form", sorted(_LEGACY))
+def test_the_default_still_refuses_each_old_form(form: str) -> None:
+    """Without legacy_forms, each old form still fails, as before."""
+    raw = _VALID_RUN + _LEGACY[form][0]
+
+    with pytest.raises(ConstraintsError):
+        parse_constraints(raw)
+    with pytest.raises(ConstraintsError):
+        parse_constraints(raw, legacy_forms=False)
+
+
+def test_legacy_forms_keep_every_other_rule() -> None:
+    """legacy_forms cleans only the old forms; each other error still fails."""
+    raw = _VALID_RUN + b'[paths]\neditable = ["/abs", "src/", "src"]\nprotected = ["a*"]\n'
+
+    with pytest.raises(ConstraintsError) as error:
+        parse_constraints(raw, legacy_forms=True)
+
+    assert sorted(d.message for d in error.value.errors) == [
+        "ascent.toml: '/abs' in [paths] editable must be relative and stay inside the repository.",
+        "ascent.toml: 'a*' in [paths] protected looks like a pattern. Patterns are not supported;"
+        " name the files or folders.",
+        "ascent.toml: [paths] editable holds 'src' more than once. List each value once.",
+    ]
+
+
+def test_legacy_forms_end_with_the_call() -> None:
+    """The option lasts for one call only, so a later default call is strict again."""
+    raw = _VALID_RUN + b'[paths]\neditable = ["src/"]\n'
+
+    parse_constraints(raw, legacy_forms=True)
+
+    with pytest.raises(ConstraintsError, match="must be written 'src'"):
+        parse_constraints(raw)
+
+
+def test_legacy_forms_give_the_same_proposal_for_a_file_in_its_one_form() -> None:
+    """A file already in its one form reads the same with or without legacy_forms."""
+    raw = _CFCA + _RUN
+
+    assert parse_constraints(raw, legacy_forms=True) == parse_constraints(raw)
+
+
+@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP", "SSE"])
+def test_legacy_forms_match_an_mcp_type_in_any_case(tmp_path: Path, kind: str) -> None:
+    """With legacy_forms, read_constraints matches the type of an MCP server in any case."""
+    server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
+
+    constraints = read_constraints(_archive(tmp_path, _mcp_files(server)), legacy_forms=True)
+
+    assert constraints is not None
+    assert constraints.run_role.mcp_servers == (
+        McpServer(name="m", url="https://a.example.com/mcp", headers={}),
+    )
+
+
+def test_read_constraints_passes_legacy_forms_to_the_toml_check(tmp_path: Path) -> None:
+    """read_constraints with legacy_forms also reads the old forms of ascent.toml."""
+    raw = _VALID_RUN + b'[paths]\neditable = ["src/"]\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
+
+    constraints = read_constraints(archive, legacy_forms=True)
+
+    assert constraints is not None
+    assert constraints.editable_paths == ("src",)
+    with pytest.raises(ConstraintsError, match="must be written 'src'"):
+        read_constraints(archive)
