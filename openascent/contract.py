@@ -157,6 +157,7 @@ class RunnerLimits:
     # A box has 1 vCPU, or an even number of vCPUs from 2 to max_vcpus.
     max_vcpus: int = _MAX_VCPUS
     # The longest timeout in seconds of [run] or a [target.<name>] stage; None sets no maximum.
+    # An unset timeout is min(60, max_timeout), and an unset stage vcpus is min(2, max_vcpus).
     max_timeout: float | None = None
 
 
@@ -754,9 +755,11 @@ def _vcpus(value: Any, label: str, section: str, limits: RunnerLimits) -> int:
         or isinstance(value, bool)
         or not (value == 1 or (value % 2 == 0 and 2 <= value <= limits.max_vcpus))
     ):
+        allowed = (
+            "1" if limits.max_vcpus < 2 else f"1 or an even number from 2 to {limits.max_vcpus}"
+        )
         raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: {label} vcpus must be 1 or an even number from 2 to"
-            f" {limits.max_vcpus}.",
+            f"{CONSTRAINTS_FILE}: {label} vcpus must be {allowed}.",
             section=section,
             key="vcpus",
         )

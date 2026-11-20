@@ -1338,7 +1338,7 @@ def test_an_unset_stage_vcpus_on_a_one_vcpu_runner_is_one() -> None:
     limits = RunnerLimits(max_vcpus=1)
 
     assert parse_constraints(_STAGE.encode(), limits=limits).targets["solver"].vcpus == 1
-    with pytest.raises(ConstraintsError, match="vcpus must be 1 or an even number from 2 to 1"):
+    with pytest.raises(ConstraintsError, match=r"vcpus must be 1\.$"):
         parse_constraints(f"{_STAGE}vcpus = 2\n".encode(), limits=limits)
 
 

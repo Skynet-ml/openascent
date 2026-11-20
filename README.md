@@ -222,6 +222,7 @@ The module `openascent.contract` reads and checks `ascent.toml`. It uses only th
 
 The runner gives its own limits as a `RunnerLimits`: the most vCPUs of a box (default 32) and the longest `timeout` of `[run]` and of a stage (default: no maximum).
 The defaults are the limits of the Skynet runner.
+When the file does not set a value, the parser uses the default cut to the limit: an unset `timeout` is `min(60, max_timeout)`, and an unset stage `vcpus` is `min(2, max_vcpus)`.
 
 ```python
 from openascent.contract import RunnerLimits, parse_constraints
