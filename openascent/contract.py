@@ -179,8 +179,7 @@ class ConstraintsError(ValueError):
 
 
 def _at(setting: str) -> dict[str, str | None]:
-    """Split a setting as errors name it, such as
-    ``[target.planner] entry``, into its section and key.
+    """Split a setting as errors name it, such as ``[target.planner] entry``, into section and key.
 
     Args:
         setting: ``[section] key ...``, ``[section]``, or a top-level key such as ``instructions``.
@@ -368,8 +367,7 @@ class RepoConstraints:
 
     @property
     def rule_files(self) -> tuple[str, ...]:
-        """Return the distinct repository paths of the
-        instructions and rule files the toml names."""
+        """Return the distinct repository paths of the instructions and rule files in the toml."""
         return tuple(dict.fromkeys(path for _, path in rule_file_settings(self)))
 
     @property
@@ -766,8 +764,7 @@ def _vcpus(value: Any, label: str, section: str, limits: RunnerLimits) -> int:
 
 
 def _tools_moved(label: str) -> ConstraintsError:
-    """Build the error for a role's ``tools`` key, which
-    names catalog tools instead of an MCP file (E46).
+    """Build the error for a ``tools`` key that names catalog tools, not an MCP file (E46).
 
     Args:
         label: The role's table as the file names it.
@@ -1157,8 +1154,7 @@ def _service(section: Any, name: str) -> ServiceSpec:
 
 
 def _service_url(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> str:
-    """Read a service's or an http MCP server's ``url``:
-    an https address on a public host name (E45, E49).
+    """Read the ``url`` of a service or an http MCP server: https on a public host (E45, E49).
 
     This is a parse-time check of the written text only. It refuses the
     obvious internal names early, but a public name can still resolve to a
@@ -1247,8 +1243,7 @@ def _service_url(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> str:
 
 
 def _service_headers(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> dict[str, str]:
-    """Read a ``headers`` table, whose values name
-    secrets only as ``${NAME}`` placeholders (E45, E53).
+    """Read a ``headers`` table whose values name secrets only as ``${NAME}`` (E45, E53).
 
     Args:
         value: The ``headers`` value as parsed.
@@ -1292,8 +1287,7 @@ def _service_headers(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> 
 
 
 def _service_query(value: Any, label: str) -> dict[str, str]:
-    """Read a service's ``query`` table, whose values are
-    each exactly one ``${NAME}`` placeholder (SKY-630).
+    """Read a service's ``query`` table: each value is one ``${NAME}`` placeholder (SKY-630).
 
     The relay adds each parameter, filled, to the url it calls. A query value
     is never mixed text, so it can only name a secret, never hold one.
