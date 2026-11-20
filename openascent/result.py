@@ -29,19 +29,23 @@ class AscentError(Exception):
         code: A stable short name of the cause.
         stderr: The bounded tail of the command's stderr, or "" when no
             command ran.
+        stdout: The bounded tail of the command's stdout, or "" when no
+            command ran.
     """
 
     code = "ascent_error"
 
-    def __init__(self, message: str, *, stderr: str = "") -> None:
+    def __init__(self, message: str, *, stderr: str = "", stdout: str = "") -> None:
         """Create the error.
 
         Args:
             message: The cause and the fix, in plain words.
             stderr: The bounded tail of the command's stderr.
+            stdout: The bounded tail of the command's stdout.
         """
         super().__init__(message)
         self.stderr = stderr
+        self.stdout = stdout
 
 
 class StartError(AscentError):
@@ -68,15 +72,16 @@ class ExitCodeError(AscentError):
 
     code = "nonzero_exit"
 
-    def __init__(self, message: str, *, exit_code: int, stderr: str = "") -> None:
+    def __init__(self, message: str, *, exit_code: int, stderr: str = "", stdout: str = "") -> None:
         """Create the error.
 
         Args:
             message: The cause and the fix, in plain words.
             exit_code: The exit code of the command.
             stderr: The bounded tail of the command's stderr.
+            stdout: The bounded tail of the command's stdout.
         """
-        super().__init__(message, stderr=stderr)
+        super().__init__(message, stderr=stderr, stdout=stdout)
         self.exit_code = exit_code
 
 

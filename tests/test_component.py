@@ -28,7 +28,7 @@ from openascent import (
     parse_entry,
 )
 from openascent.cli import main
-from openascent.component import LOG_TAIL_BYTES
+from openascent.component import LOG_TAIL_BYTES, _exit_message
 
 PY = sys.executable
 CASE = {"input": "q", "expected": "Paris", "output": "Paris"}
@@ -281,6 +281,32 @@ def test_nonzero_exit_keeps_code_and_stderr(tmp_path):
     assert caught.value.exit_code == 3
     assert caught.value.stderr.endswith("last words\n")
     assert len(caught.value.stderr) <= 64 * 1024
+
+
+def test_nonzero_exit_keeps_stdout_and_stderr_tails(tmp_path):
+    """A non-zero exit keeps the stdout tail next to the stderr tail."""
+    body = 'import sys\nprint("out line")\nprint("err line", file=sys.stderr)\nsys.exit(1)\n'
+    with pytest.raises(ExitCodeError) as caught:
+        call_run([PY, script(tmp_path, body)], 1, timeout_s=10)
+    assert caught.value.exit_code == 1
+    assert caught.value.stdout == "out line\n"
+    assert caught.value.stderr == "err line\n"
+    assert str(caught.value) == _exit_message(1)
+
+
+def test_failed_call_stdout_tail_is_bounded(tmp_path):
+    """The stdout tail on an error obeys the same size limit as the stderr tail."""
+    body = f'import sys\nsys.stdout.write("a" * {LOG_TAIL_BYTES * 3} + "OUT-END")\nsys.exit(2)\n'
+    with pytest.raises(ExitCodeError) as caught:
+        call_run([PY, script(tmp_path, body)], 1, timeout_s=10)
+    assert caught.value.stdout.endswith("OUT-END")
+    assert len(caught.value.stdout.encode()) <= LOG_TAIL_BYTES
+
+
+def test_ascent_error_stdout_defaults_to_empty():
+    """An error made without a stdout tail has an empty stdout."""
+    assert ExitCodeError("x", exit_code=1).stdout == ""
+    assert NoOutputError("x").stdout == ""
 
 
 def test_no_output_file(tmp_path):
