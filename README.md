@@ -178,7 +178,7 @@ The command prints one JSON object on stdout:
 - `ok` is `true` exactly when each check passed.
 - `python` is present only for the `metric` role. It is `null` when the `python_runtime` check failed.
 - The exit code is 0 when each check passed, and 1 when a check failed.
-- No `--role`, a wrong role, or no `--image` is a usage error: the command prints the usage on stderr and exits with code 2.
+- No `--role`, a wrong role, `--image` with a file, or `--role` with no `--image` is a usage error: the command prints the usage on stderr and exits with code 2.
 
 To add the package to any image, add one line with a pinned version, for example in a Dockerfile:
 
@@ -210,7 +210,65 @@ def score(output, expected=None):
 
 The contract key `[metric] direction` tells the runner which way is better: `"maximize"` or `"minimize"`.
 The default is `"maximize"`. The result of a metric is one finite number with no direction in it.
-The contract file is `ascent.toml`. This package does not parse `ascent.toml` yet.
+The contract file is `ascent.toml`. The next section tells how the package reads it.
+
+## The contract file `ascent.toml`
+
+The module `openascent.contract` reads and checks `ascent.toml`. It uses only the Python standard library.
+
+- `parse_constraints(raw)` reads the bytes of the file and returns the checked contract, a `RepoConstraints`.
+- `read_constraints(archive)` reads the file from a repository archive (a gzip tar file). It also checks the files that the contract names: the instructions and rule files, the `.mcp.json` files and the `[data] cases` file.
+- An invalid file raises `ConstraintsError`. The error text says what is wrong and how to fix it. `error.section` and `error.key` name the place, for example `"metric"` and `"entry"`. Each is `None` when the error has no such place.
+
+The runner gives its own limits as a `RunnerLimits`: the most vCPUs of a box (default 32) and the longest `timeout` of `[run]` and of a stage (default: no maximum).
+The defaults are the limits of the Skynet runner.
+
+```python
+from openascent.contract import RunnerLimits, parse_constraints
+
+contract = parse_constraints(raw, limits=RunnerLimits(max_vcpus=8, max_timeout=600))
+```
+
+The package does not read the Compose file that `[sandbox] compose` names. The Compose format belongs to the runner.
+The parser checks only the path. To read the file, give `read_constraints` a `compose_parser`: a function that gets the text of the file and returns the services.
+It raises `ValueError` to refuse the file, and the package turns that into a `ConstraintsError`. With no `compose_parser`, `compose_services` stays empty.
+
+### The `ascent check <file>` command
+
+`ascent check ascent.toml` checks one contract file with the full parser and prints a JSON report on stdout.
+It exits with code 0 when the file is valid:
+
+```json
+{"ok": true, "file": "ascent.toml"}
+```
+
+It exits with code 1 when the file is invalid. The report gives the error, its section and its key (`null` when the error has none):
+
+```json
+{"ok": false, "file": "ascent.toml", "error": "ascent.toml: [metric] direction must be \"maximize\" or \"minimize\".", "section": "metric", "key": "direction"}
+```
+
+A file that the command cannot read is a usage error with exit code 2.
+The command checks the file alone. The files that the contract names are not checked, because the command has no repository archive. `read_constraints` checks them.
+
+### The `ascent schema` command
+
+`ascent schema` prints the JSON Schema (draft 2020-12) of `ascent.toml`. The same schema is in the file `ascent.schema.json` at the root of this repository.
+An editor can use it to complete and check the keys, for example with Taplo or Even Better TOML:
+
+```toml
+#:schema https://raw.githubusercontent.com/Skynet-ml/openascent/main/ascent.schema.json
+```
+
+The schema holds the sections, the keys and the type of each value. It cannot hold these rules:
+
+- The rules across sections. For example, a `[metric]` needs a `[run]` or a `[target.<name>]` stage, a command `[metric] entry` needs a `[run]`, and `[proposer] setup` needs `[proposer] entry`.
+- The rules on the paths. For example, a path must stay inside the repository, a file that one role sees cannot be hidden from it, and `[paths] protected` cannot protect the whole repository.
+- The rules on secrets and hosts. For example, a header holds a secret only as `${NAME}`, a service url must be https on a public host, and one secret cannot go to two hosts.
+- The runner limits. The schema uses the default limits.
+- The rules on the files that the contract names.
+
+`ascent check` is the full check. A file that passes the schema can still fail `ascent check`.
 
 ## Helper calls
 

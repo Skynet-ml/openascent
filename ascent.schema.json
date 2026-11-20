@@ -1,0 +1,437 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Skynet-ml/openascent/blob/main/ascent.schema.json",
+  "title": "OpenAscent contract (ascent.toml), version 1",
+  "description": "The sections, keys and value types of ascent.toml. The schema cannot hold the rules across sections, such as 'a [metric] needs a [run] or a stage', or the rules on the files the contract names. ascent check is the full check.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "instructions": {
+      "type": "string",
+      "description": "The path of the instructions file."
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object"
+      },
+      "description": "[tool.<name>] tables hold data that the parser does not read."
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "editable": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "A path inside the repository."
+          },
+          "maxItems": 200,
+          "minItems": 1
+        },
+        "protected": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "A path inside the repository."
+          },
+          "maxItems": 200
+        }
+      }
+    },
+    "setup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string"
+        }
+      }
+    },
+    "proposer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mcp": {
+          "type": "string",
+          "description": "The path of the role's .mcp.json file."
+        },
+        "network": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "maxItems": 100,
+          "description": "The host names the role can reach; [] for no network."
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "description": "Names of [services.<name>] tables."
+        },
+        "illegal": {
+          "type": "string",
+          "description": "The path of a markdown file of rules."
+        },
+        "entry": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "minItems": 1,
+          "maxItems": 50
+        },
+        "setup": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "minItems": 1,
+          "maxItems": 50
+        }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mcp": {
+          "type": "string",
+          "description": "The path of the role's .mcp.json file."
+        },
+        "network": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "maxItems": 100,
+          "description": "The host names the role can reach; [] for no network."
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "description": "Names of [services.<name>] tables."
+        },
+        "illegal": {
+          "type": "string",
+          "description": "The path of a markdown file of rules."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "A path inside the repository."
+          },
+          "maxItems": 200
+        },
+        "exploits": {
+          "type": "string",
+          "description": "A path inside the repository."
+        },
+        "reference": {
+          "type": "string",
+          "description": "A path inside the repository."
+        },
+        "entry": {
+          "description": "\"path/to/file.py:function\", or a command list such as [\"node\", \"run.js\"].",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "\\.py:[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "minItems": 1,
+              "maxItems": 50
+            }
+          ]
+        },
+        "direction": {
+          "enum": [
+            "maximize",
+            "minimize"
+          ]
+        },
+        "setup": {
+          "type": "string"
+        },
+        "vcpus": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "anyOf": [
+            {
+              "const": 1
+            },
+            {
+              "multipleOf": 2
+            }
+          ],
+          "description": "1, or an even number from 2 to 32 with the default runner limits."
+        },
+        "scores": {
+          "type": "object",
+          "propertyNames": {
+            "minLength": 1
+          },
+          "maxProperties": 50,
+          "additionalProperties": {
+            "enum": [
+              "maximize",
+              "minimize"
+            ]
+          }
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mcp": {
+          "type": "string",
+          "description": "The path of the role's .mcp.json file."
+        },
+        "network": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "maxItems": 100,
+          "description": "The host names the role can reach; [] for no network."
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "description": "Names of [services.<name>] tables."
+        },
+        "illegal": {
+          "type": "string",
+          "description": "The path of a markdown file of rules."
+        },
+        "entry": {
+          "description": "\"path/to/file.py:function\", or a command list such as [\"node\", \"run.js\"].",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "\\.py:[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "minItems": 1,
+              "maxItems": 50
+            }
+          ]
+        },
+        "timeout": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Seconds."
+        },
+        "vcpus": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "anyOf": [
+            {
+              "const": 1
+            },
+            {
+              "multipleOf": 2
+            }
+          ],
+          "description": "1, or an even number from 2 to 32 with the default runner limits."
+        }
+      },
+      "required": [
+        "entry"
+      ]
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cases": {
+          "type": "string",
+          "description": "The path of a JSONL file of cases."
+        }
+      },
+      "required": [
+        "cases"
+      ]
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "compose": {
+          "type": "string",
+          "description": "The path of a Compose file."
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "type": "number"
+        },
+        "require": {
+          "type": "object",
+          "propertyNames": {
+            "minLength": 1
+          },
+          "maxProperties": 50,
+          "additionalProperties": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+      },
+      "maxProperties": 20,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mcp": {
+            "type": "string",
+            "description": "The path of the role's .mcp.json file."
+          },
+          "network": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 253
+            },
+            "maxItems": 100,
+            "description": "The host names the role can reach; [] for no network."
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "description": "Names of [services.<name>] tables."
+          },
+          "illegal": {
+            "type": "string",
+            "description": "The path of a markdown file of rules."
+          },
+          "entry": {
+            "description": "\"path/to/file.py:function\", or a command list such as [\"node\", \"run.js\"].",
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "\\.py:[A-Za-z_][A-Za-z0-9_]*$"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "minItems": 1,
+                "maxItems": 50
+              }
+            ]
+          },
+          "vcpus": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32,
+            "anyOf": [
+              {
+                "const": 1
+              },
+              {
+                "multipleOf": 2
+              }
+            ],
+            "description": "1, or an even number from 2 to 32 with the default runner limits."
+          },
+          "timeout": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Seconds."
+          }
+        },
+        "required": [
+          "entry"
+        ]
+      }
+    },
+    "services": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+      },
+      "maxProperties": 20,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "query": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
+    }
+  }
+}
