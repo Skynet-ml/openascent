@@ -290,19 +290,21 @@ def test_check_counts_each_level_and_fails_only_on_an_error(
 
 
 def test_check_escapes_control_and_bidi_characters_from_the_file(tmp_path, capsys):
-    """A key with ESC, a line separator or a bidi override prints them as escapes.
+    """A key with ESC, line separators, bidi marks or a bidi override prints them as escapes.
 
     Args:
         tmp_path: Scratch folder.
         capsys: Captures the report.
     """
-    raw = b'version = 1\n[run]\nentry = "run.py:main"\n"a\\u001bb\\u0085c\\u202ed" = 1\n'
+    key = "a\\u001bb\\u0085c\\u202ed\\u061ce\\u200ef\\u200fg\\u2028h\\u2029i"
+    raw = f'version = 1\n[run]\nentry = "run.py:main"\n"{key}" = 1\n'.encode()
     path = _write(tmp_path, raw)
 
     assert main(["check", path]) == 1
     out = capsys.readouterr().out
-    assert re.search("[\x00-\x09\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", out) is None
-    assert "a\\x1bb\\x85c\\u202ed" in out
+    unsafe = "[\x00-\x09\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]"
+    assert re.search(unsafe, out) is None
+    assert "a\\x1bb\\x85c\\u202ed\\u061ce\\u200ef\\u200fg\\u2028h\\u2029i" in out
 
 
 def test_check_reports_a_timeout_too_large_for_a_float(tmp_path, capsys):

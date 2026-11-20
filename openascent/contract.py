@@ -124,6 +124,9 @@ _BULLET = re.compile(r"[-*+](?:[ \t]+(.*))?")
 _HEADING = re.compile(r"#{1,6}(?:[ \t]|$)")
 # Each of these holds one table per name, so its keys are checked per table.
 _NAMED_SECTIONS = frozenset({"target", "services"})
+# The keys before any section header; tool is the one other top-level table.
+_TOP_KEYS = frozenset({"version", "instructions"})
+_TOP_TABLES = frozenset({*_SECTIONS, *_NAMED_SECTIONS, "tool"})
 _TABLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _SECRET_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
 _HEADER_NAME = re.compile(r"[A-Za-z0-9-]{1,64}")
@@ -271,6 +274,7 @@ class _Problems:
 # A table header such as [target.planner]; [[name]] arrays are not contract sections.
 # No two quantifiers can match the same text, so a hostile line takes linear time.
 _HEADER_LINE = re.compile(r"\s*\[([^\[\]]*)\]\s*(?:#.*)?")
+_ARRAY_LINE = re.compile(r"\s*\[\[([^\[\]]*)\]\]\s*(?:#.*)?")
 _KEY_LINE = re.compile(r"""\s*(?:"([^"]*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*[.=]""")
 
 
@@ -290,7 +294,7 @@ def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
     keys: dict[tuple[str | None, str], int] = {}
     section: str | None = None
     for number, line in enumerate(text.splitlines(), start=1):
-        header = _HEADER_LINE.fullmatch(line)
+        header = _HEADER_LINE.fullmatch(line) or _ARRAY_LINE.fullmatch(line)
         if header is not None and header.group(1).strip():
             section = ".".join(part.strip().strip("\"'") for part in header.group(1).split("."))
             headers.setdefault(section, number)
@@ -310,6 +314,12 @@ def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
         while section:
             parent, _, last = section.rpartition(".")
             found = headers.get(section) or keys.get((parent or None, last))
+            if found is None:
+                # A section such as [targt] can exist only as the parent of [targt.plan].
+                found = next(
+                    (line for name, line in headers.items() if name.startswith(f"{section}.")),
+                    None,
+                )
             if found is not None:
                 return found
             section = parent
@@ -816,10 +826,22 @@ def _text(value: Any, setting: str, limit: int) -> str:
     if value != value.strip():
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {setting} must not start or end with a space or a line break."
-            f" Write {value.strip()!r}.",
+            f" Write '{_shown(value.strip())}'.",
             **_at(setting),
         )
     return value
+
+
+def _shown(value: str) -> str:
+    """Write each control character of a value as a visible escape, for an error message.
+
+    Args:
+        value: The value from the file.
+
+    Returns:
+        The value, with each control character escaped.
+    """
+    return _CONTROL_CHARS.sub(lambda match: match.group().encode("unicode_escape").decode(), value)
 
 
 def _shell_command(value: Any, setting: str) -> str:
@@ -952,8 +974,8 @@ def _network_host(host: Any, label: str) -> str:
         )
     if host != host.lower():
         raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: {label} network entry {host!r} must be in lower case. Write"
-            f" {host.lower()!r}.",
+            f"{CONSTRAINTS_FILE}: {label} network entry '{host}' must be in lower case. Write"
+            f" '{host.lower()}'.",
             **_at(setting),
         )
     return host
@@ -1114,7 +1136,16 @@ def _entry(value: Any, label: str) -> str | tuple[str, ...]:
         try:
             return f"{_clean_path(path, f'{label} entry')}:{function}"
         except ConstraintsError as error:
-            raise problem from error
+            fixed = posixpath.normpath(path.strip().replace("\\", "/"))
+            if path.strip().startswith(("/", "\\")) or fixed.startswith(".."):
+                raise problem from error
+            try:
+                _clean_path(fixed, f"{label} entry")
+            except ConstraintsError:
+                raise problem from error
+            raise ConstraintsError(
+                f"{problem} Write '{fixed}:{function}'.", **_at(f"{label} entry")
+            ) from error
     if (
         not isinstance(value, list)
         or not 1 <= len(value) <= _MAX_COMMAND_PARTS
@@ -1951,6 +1982,8 @@ def _cases_file(section: Mapping[str, Any] | None) -> str | None:
     if section is None:
         return None
     if "cases" not in section:
+        if not _missing(section, "cases", _SECTIONS["data"]):
+            return None
         raise ConstraintsError(
             f'{CONSTRAINTS_FILE}: [data] must set cases = "<path>" to a JSONL file of cases, or be'
             " removed.",
@@ -2096,7 +2129,8 @@ def parse_constraints(
             f"{CONSTRAINTS_FILE} is not valid TOML: arrays or tables are nested too deeply."
         ) from error
     problems = _Problems()
-    if "version" not in document and require_version:
+    top_keys = {name: value for name, value in document.items() if not isinstance(value, dict)}
+    if require_version and _missing(top_keys, "version", _TOP_KEYS):
         problems.add(
             f"{CONSTRAINTS_FILE}: version is missing. Put version = 1 at the top of the file,"
             " before any section.",
@@ -2143,14 +2177,35 @@ def parse_constraints(
     # The rules across sections ask which sections the file has, so a section
     # with an error still counts as present and gives no second error.
     present = {name: bool(value) or not isinstance(value, dict) for name, value in document.items()}
+    # Service names of a misspelled [services] table, such as [servics.maps].
+    misspelled_services: list[str] = []
     for name, section in list(document.items()):
         if name not in _SECTIONS and name not in _NAMED_SECTIONS:
+            del document[name]
+            if isinstance(section, list) and section and all(isinstance(v, dict) for v in section):
+                problems.add(
+                    f"{CONSTRAINTS_FILE}: [[{name}]] is not a supported section.", key=name
+                )
+                continue
+            if not isinstance(section, dict):
+                problems.add(
+                    f"{CONSTRAINTS_FILE}: {name} is not a supported setting."
+                    + _did_you_mean(name, _TOP_KEYS),
+                    key=name,
+                )
+                continue
             problems.add(
                 f"{CONSTRAINTS_FILE}: [{name}] is not a supported section."
-                + _did_you_mean(name, [*_SECTIONS, *_NAMED_SECTIONS]),
+                + _did_you_mean(name, _TOP_TABLES),
                 section=name,
             )
-            del document[name]
+            # The misspelling already has its error, so the rules that need the
+            # section it names count that section as present, as _missing does for keys.
+            close = difflib.get_close_matches(name, sorted(_TOP_TABLES), n=1)
+            if close:
+                present[close[0]] = True
+                if close[0] == "services":
+                    misspelled_services += section
             continue
         if not isinstance(section, dict):
             problems.add(f"{CONSTRAINTS_FILE}: {name} must be a [{name}] table.", key=name)
@@ -2196,7 +2251,7 @@ def parse_constraints(
             key="editable",
         )
     # Every declared name counts, so a role that names a service with an error gets no second one.
-    declared = tuple(document.get("services", {}))
+    declared = (*document.get("services", {}), *misspelled_services)
     services = {
         name: spec
         for name, table in problems.check(_named_tables, document, "services", default={}).items()
@@ -2211,7 +2266,7 @@ def parse_constraints(
     proposer = _role(proposer_section, "[proposer]", declared, problems)
     proposer_entry = problems.check(_command, proposer_section, "entry", "[proposer]")
     proposer_setup = problems.check(_command, proposer_section, "setup", "[proposer]")
-    if proposer_setup is not None and "entry" not in proposer_section:
+    if "setup" in proposer_section and _missing(proposer_section, "entry", _SECTIONS["proposer"]):
         problems.add(
             f"{CONSTRAINTS_FILE}: [proposer] setup needs [proposer] entry. setup prepares your own"
             " proposer command; add entry, or remove setup to use the runner's own agent.",

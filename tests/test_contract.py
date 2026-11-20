@@ -3926,3 +3926,135 @@ def test_a_long_hostile_header_line_is_scanned_in_linear_time() -> None:
 
     assert time.monotonic() - start < 1
     assert {(e.line, e.key) for e in caught.value.errors} == {(4, "vcpus"), (5, "note")}
+
+
+_VALID_RUN = b'version = 1\n[run]\nentry = "run.py:main"\n'
+
+
+@pytest.mark.parametrize(
+    ("raw", "error"),
+    [
+        (
+            b'version = 1\n[rn]\nentry = "run.py:main"\n[metric]\nentry = "m.py:score"\n',
+            (2, "rn", None, "ascent.toml: [rn] is not a supported section. Did you mean 'run'?"),
+        ),
+        (
+            b'version = 1\n[targt.plan]\nentry = "p.py:plan"\n',
+            (
+                2,
+                "targt",
+                None,
+                "ascent.toml: [targt] is not a supported section. Did you mean 'target'?",
+            ),
+        ),
+        (
+            _VALID_RUN + b'services = ["maps"]\n[servics.maps]\nurl = "https://api.example.com"\n',
+            (
+                5,
+                "servics",
+                None,
+                "ascent.toml: [servics] is not a supported section. Did you mean 'services'?",
+            ),
+        ),
+    ],
+)
+def test_a_misspelled_section_gives_no_follow_on_error(raw: bytes, error: tuple) -> None:
+    """A misspelled [run], [target] or [services] table counts as present for later rules."""
+    assert _errors(raw) == [error]
+
+
+@pytest.mark.parametrize(
+    ("raw", "error"),
+    [
+        (
+            _VALID_RUN + b'[data]\ncase = "cases.jsonl"\n',
+            (
+                5,
+                "data",
+                "case",
+                "ascent.toml: [data] case is not a supported setting. Did you mean 'cases'?",
+            ),
+        ),
+        (
+            _VALID_RUN + b'[proposer]\nentri = ["node", "a.js"]\nsetup = ["npm", "ci"]\n',
+            (
+                5,
+                "proposer",
+                "entri",
+                "ascent.toml: [proposer] entri is not a supported setting. Did you mean 'entry'?",
+            ),
+        ),
+        (
+            b'versio = 1\n[run]\nentry = "run.py:main"\n',
+            (
+                1,
+                None,
+                "versio",
+                "ascent.toml: versio is not a supported setting. Did you mean 'version'?",
+            ),
+        ),
+    ],
+)
+def test_a_misspelled_required_key_gives_no_missing_error(raw: bytes, error: tuple) -> None:
+    """A misspelled cases, proposer entry or version key gives one error that names the key."""
+    assert _errors(raw) == [error]
+
+
+def test_an_unknown_array_of_tables_is_named_as_one() -> None:
+    """[[foo]] is named as an array section, and its keys do not count under [run]."""
+    assert _errors(_VALID_RUN + b"[[foo]]\nvcpus = 3\n") == [
+        (4, None, "foo", "ascent.toml: [[foo]] is not a supported section.")
+    ]
+
+
+def test_proposer_setup_text_with_no_entry_also_needs_entry() -> None:
+    """A proposer setup of the wrong type still gets the error that it needs an entry."""
+    assert [message for *_, message in _errors(_VALID_RUN + b'[proposer]\nsetup = "npm ci"\n')] == [
+        'ascent.toml: [proposer] setup must be a command list such as ["node", "my-agent.js"].',
+        "ascent.toml: [proposer] setup needs [proposer] entry. setup prepares your own proposer"
+        " command; add entry, or remove setup to use the runner's own agent.",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("entry", "fixed"),
+    [
+        ("./run.py:main", "run.py:main"),
+        ("src\\\\run.py:main", "src/run.py:main"),
+        (" run.py:main", "run.py:main"),
+    ],
+)
+def test_an_entry_path_in_another_form_names_the_valid_form(entry: str, fixed: str) -> None:
+    """An entry path with ./, a backslash or a space at the start names its one valid form."""
+    raw = f'version = 1\n[run]\nentry = "{entry}"\n'.encode()
+    assert _errors(raw) == [
+        (
+            3,
+            "run",
+            "entry",
+            'ascent.toml: [run] entry must be "path/to/file.py:function" for a Python function,'
+            f' or a command list such as ["node", "planner.js"]. Write \'{fixed}\'.',
+        )
+    ]
+
+
+def test_an_entry_outside_the_repository_names_no_valid_form() -> None:
+    """An entry path that leaves the repository gets only the general entry error."""
+    message = _errors(b'version = 1\n[run]\nentry = "../run.py:main"\n')[0][3]
+    assert "Write" not in message
+
+
+def test_a_section_with_only_subtables_gets_the_line_of_its_first_subtable() -> None:
+    """An error on [metric] gets the line of [metric.scores] when there is no [metric] header."""
+    errors = _errors(b"version = 1\n[metric.scores]\nx = 1\n")
+    assert [(line, section) for line, section, *_ in errors if section == "metric"] == [
+        (2, "metric")
+    ]
+
+
+def test_the_write_hint_quotes_a_value_with_single_quotes() -> None:
+    """The text and host hints use single quotes, as the path hints do."""
+    raw = _VALID_RUN + b"[setup]\ncommand = \" echo 'hi'\"\n"
+    assert _errors(raw)[0][3].endswith("Write 'echo 'hi''.")
+    raw = _VALID_RUN + b'network = ["API.example.com"]\n'
+    assert _errors(raw)[0][3].endswith("Write 'api.example.com'.")

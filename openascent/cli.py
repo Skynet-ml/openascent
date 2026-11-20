@@ -38,8 +38,11 @@ from .schema import schema_text
 
 DEFAULT_TIMEOUT_S = 60.0
 
-# C0 and C1 controls, DEL, and the bidi embedding, override and isolate controls.
-_UNSAFE_CHARS = re.compile("[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+# C0 and C1 controls, DEL, the bidi marks, embeddings, overrides and isolates,
+# and the line and paragraph separators.
+_UNSAFE_CHARS = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]"
+)
 
 
 def main(argv: list[str] | None = None) -> int:
