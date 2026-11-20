@@ -957,24 +957,27 @@ def _timeout(section: Mapping[str, Any], label: str, unit: str, limits: RunnerLi
     """
     timeout = section.get("timeout", _DEFAULT_TIMEOUT_SECONDS)
     # bool is an int in Python, so ``timeout = true`` would otherwise read as 1.
-    if (
-        not isinstance(timeout, (int, float))
-        or isinstance(timeout, bool)
-        or not math.isfinite(timeout)
-        or timeout <= 0
-    ):
+    number = (
+        timeout if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else math.nan
+    )
+    try:
+        number = float(number)
+    except OverflowError:
+        # A TOML integer can have hundreds of digits, more than a float holds.
+        number = math.nan
+    if not math.isfinite(number) or number <= 0:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} timeout must be a positive number of seconds for each"
             f" {unit}.",
             **_at(f"{label} timeout"),
         )
-    if limits.max_timeout is not None and timeout > limits.max_timeout:
+    if limits.max_timeout is not None and number > limits.max_timeout:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} timeout must be at most {limits.max_timeout:g} seconds"
             f" for each {unit}.",
             **_at(f"{label} timeout"),
         )
-    return float(timeout)
+    return number
 
 
 def _run(

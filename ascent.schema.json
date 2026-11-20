@@ -157,7 +157,7 @@
           "anyOf": [
             {
               "type": "string",
-              "pattern": "\\.py:[A-Za-z_][A-Za-z0-9_]*$"
+              "pattern": "\\.py:[^:]+$"
             },
             {
               "type": "array",
@@ -243,7 +243,7 @@
           "anyOf": [
             {
               "type": "string",
-              "pattern": "\\.py:[A-Za-z_][A-Za-z0-9_]*$"
+              "pattern": "\\.py:[^:]+$"
             },
             {
               "type": "array",
@@ -363,7 +363,7 @@
             "anyOf": [
               {
                 "type": "string",
-                "pattern": "\\.py:[A-Za-z_][A-Za-z0-9_]*$"
+                "pattern": "\\.py:[^:]+$"
               },
               {
                 "type": "array",

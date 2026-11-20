@@ -1329,6 +1329,10 @@ def test_supported_vcpu_counts_parse(vcpus: int) -> None:
             r"\[target\.solver\] timeout must be a positive",
         ),
         (
+            b'version = 1\n[target.solver]\nentry = "s.py:f"\ntimeout = 1' + b"0" * 400 + b"\n",
+            r"\[target\.solver\] timeout must be a positive",
+        ),
+        (
             b'version = 1\n[target.solver]\nentry = "s.py:f"\nmemory = 4\n',
             r"\[target\.solver\] memory is not a supported setting",
         ),
@@ -1538,6 +1542,10 @@ def test_a_run_timeout_parses() -> None:
         ),
         (
             b'version = 1\n[run]\nentry = "a.py:f"\ntimeout = inf\n',
+            r"\[run\] timeout must be a positive",
+        ),
+        (
+            b'version = 1\n[run]\nentry = "a.py:f"\ntimeout = 1' + b"0" * 400 + b"\n",
             r"\[run\] timeout must be a positive",
         ),
         (b'version = 1\nrun = "a.py:f"\n', r"run must be a \[run\] table"),

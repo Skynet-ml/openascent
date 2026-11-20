@@ -34,7 +34,7 @@ _COMMAND = {
 }
 _ENTRY = {
     "description": '"path/to/file.py:function", or a command list such as ["node", "run.js"].',
-    "anyOf": [{"type": "string", "pattern": r"\.py:[A-Za-z_][A-Za-z0-9_]*$"}, _COMMAND],
+    "anyOf": [{"type": "string", "pattern": r"\.py:[^:]+$"}, _COMMAND],
 }
 _TIMEOUT = {"type": "number", "exclusiveMinimum": 0, "description": "Seconds."}
 _VCPUS = {

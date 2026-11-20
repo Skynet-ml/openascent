@@ -135,6 +135,14 @@ def test_a_contract_with_every_key_passes_the_parser_and_the_schema():
     assert list(_validator().iter_errors(tomllib.loads(FULL.decode()))) == []
 
 
+def test_a_unicode_function_name_passes_the_parser_and_the_schema():
+    """The schema accepts every function name that ``str.isidentifier()`` accepts."""
+    raw = 'version = 1\n[run]\nentry = "run.py:scoré"\n'.encode()
+
+    assert parse_constraints(raw).run_entry == "run.py:scoré"
+    assert list(_validator().iter_errors(tomllib.loads(raw.decode()))) == []
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -204,6 +212,26 @@ def test_check_reports_the_error_with_its_section_and_key(tmp_path, capsys):
         "error": "ascent.toml: [run] vcpus must be 1 or an even number from 2 to 32.",
         "section": "run",
         "key": "vcpus",
+    }
+
+
+def test_check_reports_a_timeout_too_large_for_a_float(tmp_path, capsys):
+    """A timeout integer with hundreds of digits prints the JSON report, not a traceback.
+
+    Args:
+        tmp_path: Scratch folder.
+        capsys: Captures the report.
+    """
+    raw = b'version = 1\n[run]\nentry = "run.py:main"\ntimeout = 1' + b"0" * 400 + b"\n"
+    path = _write(tmp_path, raw)
+
+    assert main(["check", path]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False,
+        "file": path,
+        "error": "ascent.toml: [run] timeout must be a positive number of seconds for each case.",
+        "section": "run",
+        "key": "timeout",
     }
 
 
