@@ -229,7 +229,16 @@ The module `openascent.contract` reads and checks `ascent.toml`. It uses only th
 - One error lists at most 500 diagnostics. When there are more, one last diagnostic counts the ones that are not shown, and `error.hidden` holds that number. The count line of `ascent check` gives the full number of errors.
 - A valid file has its warnings in `contract.warnings`. No check gives a warning yet.
 - The parser does not convert a value. A value in another form fails, and the error gives the one valid form. For example, `"src/"` must be `"src"`, a host must be in lower case, and a list holds each value once.
-- `legacy_forms=True` (a keyword of `parse_constraints` and `read_constraints`) is only for a runner that reads again the contract of a run that started under an older, lenient reader. It accepts the old forms and converts them: it strips the spaces and line breaks around `[setup] command` and `[metric] setup`, cleans a path (spaces around it, `\` between folders, a `/` at the end), puts a `network` host in lower case, and matches an MCP server `type` in any case. All other rules stay the same. New checks keep the default, `False`.
+- `legacy_forms=True` (a keyword of `parse_constraints` and `read_constraints`) is only for a runner that reads again the contract of a run that started under an older, lenient reader. It accepts each form that the older reader accepted, and gives the same values as that reader:
+  - It strips `[setup] command` and `[metric] setup`, and lets them hold line breaks and tabs.
+  - It cleans a path: spaces around it, `\` between folders, a `/` at the end.
+  - It strips each name of a `services` list.
+  - It puts a `network` host in lower case, and accepts localhost or an IP address. The older reader had no public-host check.
+  - It lets a part of a command `entry` hold a control character.
+  - It drops a value that a list holds twice, with no error, and keeps the first.
+  - It matches an MCP server `type` in any case.
+
+  All other rules stay the same. New checks keep the default, `False`.
 
 The runner gives its own limits as a `RunnerLimits`: the most vCPUs of a box (default 32) and the longest `timeout` of `[run]` and of a stage (default: no maximum).
 The defaults are the limits of the Skynet runner.

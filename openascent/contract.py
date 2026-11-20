@@ -928,6 +928,9 @@ def _clean_path(raw: Any, setting: str) -> str:
 def _distinct(values: Sequence[str], setting: str, problems: _Problems) -> tuple[str, ...]:
     """Record each value that a list holds twice: a list has one form, with each value once.
 
+    Under ``legacy_forms`` a repeat is no error, because the older reader
+    dropped each repeat and kept the first value.
+
     Args:
         values: The checked values, in file order.
         setting: The setting of the list, named in errors.
@@ -937,7 +940,7 @@ def _distinct(values: Sequence[str], setting: str, problems: _Problems) -> tuple
         Each value once, in file order, so a duplicate hides no other mistake.
     """
     unique = tuple(dict.fromkeys(values))
-    if len(unique) < len(values):
+    if len(unique) < len(values) and not _LEGACY_FORMS.get():
         for value in dict.fromkeys(value for value in values if values.count(value) > 1):
             problems.add(
                 f"{CONSTRAINTS_FILE}: {setting} holds '{value}' more than once. List each value"
@@ -1039,22 +1042,27 @@ def _shown(value: str) -> str:
 def _shell_command(value: Any, setting: str) -> str:
     """Read one shell command, such as ``[setup] command``.
 
+    Under ``legacy_forms`` the command is stripped and may hold line breaks,
+    tabs and other control characters, as the older reader allowed, so a
+    multi-line command keeps its lines.
+
     Args:
         value: The value as parsed.
         setting: The setting's name, used in errors.
 
     Returns:
-        The command.
+        The command; stripped under ``legacy_forms``.
 
     Raises:
         ConstraintsError: When the value is not text of 1 to the command limit
-            of characters, has a space at the start or the end, or holds a
-            control character.
+            of characters, or, unless under ``legacy_forms``, has a space at the
+            start or the end or holds a control character.
     """
-    if _LEGACY_FORMS.get() and isinstance(value, str):
+    legacy = _LEGACY_FORMS.get()
+    if legacy and isinstance(value, str):
         value = value.strip()
     command = _text(value, setting, _MAX_COMMAND_CHARS)
-    if _CONTROL_CHARS.search(command):
+    if not legacy and _CONTROL_CHARS.search(command):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {setting} must be one command without control characters, such"
             ' as "pip install -r requirements.txt".',
@@ -1124,7 +1132,8 @@ def _names(
 
     Returns:
         The valid names, each once, in file order; empty when the key is absent
-        or the value is not a bounded list.
+        or the value is not a bounded list. Under ``legacy_forms`` each name is
+        stripped first, as the older reader did.
     """
     values = section.get(key, [])
     setting = f"{label} {key}"
@@ -1134,6 +1143,8 @@ def _names(
             **_at(setting),
         )
         return ()
+    if _LEGACY_FORMS.get():
+        values = [value.strip() if isinstance(value, str) else value for value in values]
     names = [problems.check(_text, value, setting, _MAX_NAME_CHARS) for value in values]
     return _distinct([name for name in names if name is not None], setting, problems)
 
@@ -1141,15 +1152,19 @@ def _names(
 def _network_host(host: Any, label: str) -> str:
     """Check one entry of a ``network`` list.
 
+    Under ``legacy_forms`` the host is put in lower case, and localhost or an
+    IP address is accepted, because the older reader had no public-host check.
+
     Args:
         host: The entry as parsed.
         label: The table as the file names it, used in errors.
 
     Returns:
-        The host as written.
+        The host as written; in lower case under ``legacy_forms``.
 
     Raises:
-        ConstraintsError: When the entry is not a public host name in lower case.
+        ConstraintsError: When the entry is not a host name, or, unless under
+            ``legacy_forms``, not a public host name in lower case.
     """
     setting = f"{label} network"
     if _LEGACY_FORMS.get() and isinstance(host, str):
@@ -1161,7 +1176,10 @@ def _network_host(host: Any, label: str) -> str:
             **_at(setting),
         )
     # The same rules as a service url, so an allowlist cannot open a path to internal hosts.
-    if not _public_host(host.lower().removeprefix("*.").partition(":")[0]):
+    # A run that started under the older reader keeps the hosts that reader allowed.
+    if not _LEGACY_FORMS.get() and not _public_host(
+        host.lower().removeprefix("*.").partition(":")[0]
+    ):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} network entry {host!r} must name a public host such"
             " as api.example.com, not an IP address or localhost.",
@@ -1313,7 +1331,9 @@ def _entry(value: Any, label: str) -> str | tuple[str, ...]:
         ``"path.py:function"`` with a cleaned path, or the command as a tuple.
 
     Raises:
-        ConstraintsError: When the value is neither form.
+        ConstraintsError: When the value is neither form. A command part may
+            hold a control character only under ``legacy_forms``, as the older
+            reader allowed.
     """
     problem = ConstraintsError(
         f'{CONSTRAINTS_FILE}: {label} entry must be "path/to/file.py:function" for a Python'
@@ -1344,7 +1364,7 @@ def _entry(value: Any, label: str) -> str | tuple[str, ...]:
             isinstance(part, str)
             and part.strip()
             and len(part) <= _MAX_COMMAND_CHARS
-            and not _CONTROL_CHARS.search(part)
+            and (_LEGACY_FORMS.get() or not _CONTROL_CHARS.search(part))
             for part in value
         )
     ):
@@ -2347,14 +2367,17 @@ def parse_constraints(
             was required (SKY-690); a wrong ``version`` fails either way.
         limits: The runner's limits, such as the most vCPUs of a box.
         legacy_forms: Only for re-reading the contract of a run that started
-            under an older, lenient reader (SKY-760). ``True`` accepts the
-            forms that reader normalized, and normalizes them the same way:
-            a ``[setup] command`` or ``[metric] setup`` with a space or line
-            break at the start or the end is stripped; a path with spaces
-            around it, a ``\\`` between folders or a ``/`` at the end is
-            cleaned; a ``network`` host is put in lower case; and an MCP
-            server ``type`` matches in any case. All other rules stay the
-            same. New checks keep the default, ``False``.
+            under an older, lenient reader (SKY-760). ``True`` accepts each
+            form that reader accepted, and gives the values that reader gave:
+            a ``[setup] command`` or ``[metric] setup`` is stripped and may
+            hold line breaks and tabs; a path with spaces around it, a ``\\``
+            between folders or a ``/`` at the end is cleaned; each name of a
+            ``services`` list is stripped; a ``network`` host is put in lower
+            case, and localhost or an IP address is accepted; a part of a
+            command ``entry`` may hold a control character; a value that a
+            list holds twice is dropped with no error, and the first stays;
+            and an MCP server ``type`` matches in any case. All other rules
+            stay the same. New checks keep the default, ``False``.
 
     Returns:
         The validated proposal.

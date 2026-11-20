@@ -4577,6 +4577,58 @@ _LEGACY = {
         ("scoring",),
     ),
     "upper-host": (b'network = ["API.Example.com"]\n', "run_role.network", ("api.example.com",)),
+    "setup-lines": (
+        b'[setup]\ncommand = """\npip install x\nnpm ci\n"""\n',
+        "setup_command",
+        "pip install x\nnpm ci",
+    ),
+    "setup-tab": (b'[setup]\ncommand = "pip\\tinstall x"\n', "setup_command", "pip\tinstall x"),
+    "metric-setup-lines": (
+        b'[metric]\nsetup = """\nmake\nmake test\n"""\n',
+        "metric.setup",
+        "make\nmake test",
+    ),
+    "metric-entry-control": (
+        b'[metric]\nfiles = ["m.sh"]\nentry = ["./m.sh", "a\\tb"]\n',
+        "metric.entry",
+        ("./m.sh", "a\tb"),
+    ),
+    "editable-repeat": (b'[paths]\neditable = ["src", "src"]\n', "editable_paths", ("src",)),
+    "editable-repeat-slash": (
+        b'[paths]\neditable = ["src", "src/"]\n',
+        "editable_paths",
+        ("src",),
+    ),
+    "protected-repeat-backslash": (
+        b"[paths]\nprotected = ['a\\b', 'a/b']\n",
+        "protected_paths",
+        ("a/b",),
+    ),
+    "metric-files-repeat": (
+        b'[metric]\nfiles = ["m.py", "m.py/"]\n',
+        "metric.files",
+        ("m.py",),
+    ),
+    "network-repeat": (
+        b'network = ["API.example.com", "api.example.com"]\n',
+        "run_role.network",
+        ("api.example.com",),
+    ),
+    "network-local": (
+        b'network = ["localhost", "10.0.0.1:8080"]\n',
+        "run_role.network",
+        ("localhost", "10.0.0.1:8080"),
+    ),
+    "services-repeat": (
+        b'services = ["svc", "svc"]\n[services.svc]\nurl = "https://svc.example.com"\n',
+        "run_role.services",
+        ("svc",),
+    ),
+    "services-spaces": (
+        b'services = [" svc"]\n[services.svc]\nurl = "https://svc.example.com"\n',
+        "run_role.services",
+        ("svc",),
+    ),
 }
 
 
@@ -4610,7 +4662,10 @@ def test_the_default_still_refuses_each_old_form(form: str) -> None:
 
 def test_legacy_forms_keep_every_other_rule() -> None:
     """legacy_forms cleans only the old forms; each other error still fails."""
-    raw = _VALID_RUN + b'[paths]\neditable = ["/abs", "src/", "src"]\nprotected = ["a*"]\n'
+    raw = _VALID_RUN + (
+        b'network = ["https://api.example.com"]\n'
+        b'[paths]\neditable = ["/abs", "src/", "src"]\nprotected = ["a*"]\n'
+    )
 
     with pytest.raises(ConstraintsError) as error:
         parse_constraints(raw, legacy_forms=True)
@@ -4619,8 +4674,59 @@ def test_legacy_forms_keep_every_other_rule() -> None:
         "ascent.toml: '/abs' in [paths] editable must be relative and stay inside the repository.",
         "ascent.toml: 'a*' in [paths] protected looks like a pattern. Patterns are not supported;"
         " name the files or folders.",
-        "ascent.toml: [paths] editable holds 'src' more than once. List each value once.",
+        "ascent.toml: [run] network entry 'https://api.example.com' must be a host name such as"
+        " api.example.com, not a URL. Use network = [] for no network.",
     ]
+
+
+def test_legacy_forms_clean_the_path_part_of_an_entry() -> None:
+    """With legacy_forms, the path of a Python entry is cleaned, as the older reader did."""
+    raw = b"version = 1\n[run]\nentry = ' src\\run.py:main'\n"
+
+    assert parse_constraints(raw, legacy_forms=True).run_entry == "src/run.py:main"
+    with pytest.raises(ConstraintsError, match="Write 'src/run.py:main'"):
+        parse_constraints(raw)
+
+
+def test_legacy_forms_clean_the_paths_of_the_named_files(tmp_path: Path) -> None:
+    """With legacy_forms, read_constraints reads each named file from its cleaned path."""
+    raw = (
+        b"version = 1\ninstructions = ' docs\\intent.md '\n"
+        b"[run]\nentry = \"run.py:main\"\nmcp = 'roles\\.mcp.json'\nillegal = 'docs/rules.md/'\n"
+        b"[data]\ncases = ' data\\cases.jsonl'\n"
+        b"[sandbox]\ncompose = 'deploy/compose.yml/'\n"
+    )
+    archive = _archive(
+        tmp_path,
+        {
+            CONSTRAINTS_FILE: raw,
+            "docs/intent.md": b"Keep the reply format.\n",
+            "roles/.mcp.json": b'{"mcpServers": {"m": {"type": "HTTP",'
+            b' "url": "https://a.example.com/mcp"}}}',
+            "docs/rules.md": b"- Do not call the network.\n",
+            "data/cases.jsonl": b'{"input": 1}\n',
+            "deploy/compose.yml": b"services: {}\n",
+        },
+    )
+
+    constraints = read_constraints(archive, legacy_forms=True, compose_parser=lambda text: ("db",))
+
+    assert constraints is not None
+    assert constraints.instructions_file == "docs/intent.md"
+    assert constraints.intent == "Keep the reply format."
+    assert constraints.run_role.mcp == "roles/.mcp.json"
+    assert constraints.run_role.mcp_servers == (
+        McpServer(name="m", url="https://a.example.com/mcp", headers={}),
+    )
+    assert constraints.run_role.illegal_file == "docs/rules.md"
+    assert constraints.run_role.illegal == ("Do not call the network.",)
+    assert constraints.cases_file == "data/cases.jsonl"
+    assert constraints.cases == ({"input": 1},)
+    assert constraints.compose_file == "deploy/compose.yml"
+    assert constraints.compose_services == ("db",)
+    with pytest.raises(ConstraintsError) as error:
+        read_constraints(archive, compose_parser=lambda text: ("db",))
+    assert len(error.value.errors) == 5
 
 
 def test_legacy_forms_end_with_the_call() -> None:
