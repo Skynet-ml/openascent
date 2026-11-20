@@ -89,6 +89,8 @@ Each error type has a stable `code`:
 | `invalid_json` | The output file is not strict JSON: not UTF-8, a `NaN` or `Infinity` token, a float literal that overflows (`1e400`), an integer longer than the digit limit of the Python interpreter (4300 digits by default), a duplicate key, or a lone surrogate escape such as `"\ud800"`. |
 | `invalid_form` | The output file is valid JSON but not the valid form, for example a metric result with no `score`, or a `score` that is an integer too large for a float. A large integer in a run output is valid. |
 
+Every error after the command runs keeps the tails of stdout and stderr in `error.stdout` and `error.stderr`. A `start_failed` error has empty tails.
+
 ## The two entry forms
 
 - A command: a list of strings, for example `["./metric.sh"]` or `["node", "metric.mjs"]`.

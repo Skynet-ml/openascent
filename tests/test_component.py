@@ -303,6 +303,27 @@ def test_failed_call_stdout_tail_is_bounded(tmp_path):
     assert len(caught.value.stdout.encode()) <= LOG_TAIL_BYTES
 
 
+def test_no_output_keeps_stdout_tail(tmp_path):
+    """Exit 0 with no output file keeps the stdout tail on the error."""
+    with pytest.raises(NoOutputError) as caught:
+        call_run([PY, script(tmp_path, "print('out line')\n")], 1, timeout_s=10)
+    assert caught.value.stdout == "out line\n"
+
+
+def test_time_limit_keeps_stdout_tail(tmp_path):
+    """A stopped command keeps the stdout that it flushed before the time limit."""
+    body = "import time\nprint('out line', flush=True)\ntime.sleep(60)\n"
+    entry = [PY, script(tmp_path, body)]
+    # A loaded machine can start Python slower than the shortest limit, so
+    # longer limits give the print time to happen before the kill.
+    for limit in (2, 10, 30):
+        with pytest.raises(TimeLimitError) as caught:
+            call_run(entry, 1, timeout_s=limit)
+        if caught.value.stdout:
+            break
+    assert caught.value.stdout == "out line\n"
+
+
 def test_ascent_error_stdout_defaults_to_empty():
     """An error made without a stdout tail has an empty stdout."""
     assert ExitCodeError("x", exit_code=1).stdout == ""
