@@ -55,6 +55,8 @@ _MAX_RULE_FILE_BYTES = 32 * 1024
 _MAX_CASES_FILE_BYTES = 20 * 1024 * 1024
 # The same limit as the cases list of a run request.
 _MAX_CASES = 200_000
+# A cases file can be 20 MiB, so a file of bad lines reports only the first ones.
+_MAX_CASE_LINE_ERRORS = 100
 _CASE_KEYS = frozenset({"input", "expected"})
 _MAX_COMMAND_CHARS = 300
 _MAX_RULES = 50
@@ -275,7 +277,34 @@ class _Problems:
 # No two quantifiers can match the same text, so a hostile line takes linear time.
 _HEADER_LINE = re.compile(r"\s*\[([^\[\]]*)\]\s*(?:#.*)?")
 _ARRAY_LINE = re.compile(r"\s*\[\[([^\[\]]*)\]\]\s*(?:#.*)?")
-_KEY_LINE = re.compile(r"""\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*[.=]""")
+# Contract names are at most four parts deep, such as services.maps.headers.X;
+# a cap keeps a hostile dotted name of 30000 parts linear in the line scan.
+_MAX_NAME_PARTS = 8
+# One part of a dotted key, and the "." or "=" after it.
+_KEY_PART = re.compile(r"""\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*([.=])""")
+
+
+def _key_parts(line: str) -> tuple[list[str], int] | None:
+    """Read the dotted key at the start of a line, such as ``require."f1" =``.
+
+    Args:
+        line: One line of the file.
+
+    Returns:
+        The decoded parts and the index after the ``=``, or ``None`` when the
+        line does not start with a key.
+    """
+    parts: list[str] = []
+    index = 0
+    while (part := _KEY_PART.match(line, index)) is not None:
+        if part.group(1) is not None:
+            parts.append(_basic_key(part.group(1)))
+        else:
+            parts.append(part.group(2) if part.group(2) is not None else part.group(3))
+        index = part.end()
+        if part.group(4) == "=":
+            return parts, index
+    return None
 
 
 def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
@@ -291,6 +320,9 @@ def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
         The errors in the same order, each with the line found, or ``None``.
     """
     headers: dict[str, int] = {}
+    # The first header under each section name, for a section that exists only
+    # as the parent of subtables, such as [targt] in [targt.plan].
+    subtables: dict[str, int] = {}
     keys: dict[tuple[str | None, str], int] = {}
     section: str | None = None
     # A value that goes on past its line: open brackets, and an open multi-line string.
@@ -303,14 +335,19 @@ def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
         if header is not None and header.group(1).strip():
             section = ".".join(part.strip().strip("\"'") for part in header.group(1).split("."))
             headers.setdefault(section, number)
+            names = section.split(".", _MAX_NAME_PARTS)
+            for count in range(1, min(len(names), _MAX_NAME_PARTS)):
+                subtables.setdefault(".".join(names[:count]), number)
             continue
-        key = _KEY_LINE.match(line)
+        key = _key_parts(line)
         if key is not None:
-            name = key.group(2) if key.group(2) is not None else key.group(3)
-            if key.group(1) is not None:
-                name = _basic_key(key.group(1))
-            keys.setdefault((section, name), number)
-            depth, open_string = _value_state(line, key.end(), 0, None)
+            parts, end = key
+            # require.f1 = 1 sets f1 in [<section>.require], and names require in <section>.
+            table = section
+            for part in parts[:_MAX_NAME_PARTS]:
+                keys.setdefault((table, part), number)
+                table = f"{table}.{part}" if table else part
+            depth, open_string = _value_state(line, end, 0, None)
 
     def line_of(section: str | None, key: str | None) -> int | None:
         """Return the line of the key, else of the nearest header or dotted key that holds it."""
@@ -320,13 +357,9 @@ def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
                 return found
         while section:
             parent, _, last = section.rpartition(".")
-            found = headers.get(section) or keys.get((parent or None, last))
-            if found is None:
-                # A section such as [targt] can exist only as the parent of [targt.plan].
-                found = next(
-                    (line for name, line in headers.items() if name.startswith(f"{section}.")),
-                    None,
-                )
+            found = (
+                headers.get(section) or keys.get((parent or None, last)) or subtables.get(section)
+            )
             if found is not None:
                 return found
             section = parent
@@ -2278,23 +2311,15 @@ def parse_constraints(
     for name, section in list(document.items()):
         if name not in _SECTIONS and name not in _NAMED_SECTIONS:
             del document[name]
-            if isinstance(section, list) and section and all(isinstance(v, dict) for v in section):
-                problems.add(
-                    f"{CONSTRAINTS_FILE}: [[{name}]] is not a supported section.", key=name
-                )
-                continue
-            if not isinstance(section, dict):
-                problems.add(
-                    f"{CONSTRAINTS_FILE}: {name} is not a supported setting."
-                    + _did_you_mean(name, _TOP_KEYS),
-                    key=name,
-                )
-                continue
+            # Callers match this text and place, so a top-level value such as
+            # foo = 1 or [[foo]] keeps the error of an unknown section.
             problems.add(
                 f"{CONSTRAINTS_FILE}: [{name}] is not a supported section."
-                + _did_you_mean(name, _TOP_TABLES),
+                + _did_you_mean(name, (*_TOP_TABLES, *_TOP_KEYS)),
                 section=name,
             )
+            if not isinstance(section, dict):
+                continue
             # The misspelling already has its error, so the rules that need the
             # section it names count that section as present, as _missing does for keys.
             close = difflib.get_close_matches(name, sorted(_TOP_TABLES), n=1)
@@ -2682,7 +2707,8 @@ def _load_cases(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
 
     Raises:
         ConstraintsError: When the file is missing, is a link or folder, is too
-            large, is not UTF-8, holds no case or too many, or has a line that
+            large, is not UTF-8, or holds no case or too many. Also with one
+            error for each line, up to the first ``_MAX_CASE_LINE_ERRORS``, that
             is not a JSON object with ``input`` and an optional ``expected``.
     """
     path = constraints.cases_file
@@ -2719,6 +2745,8 @@ def _load_cases(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
             **_at(setting),
         ) from exc
     cases: list[dict[str, Any]] = []
+    problems = _Problems()
+    bad_lines = 0
     for number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
@@ -2727,22 +2755,34 @@ def _load_cases(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
         except (ValueError, RecursionError):
             case = None
         if not isinstance(case, dict) or "input" not in case or set(case) - _CASE_KEYS:
-            raise ConstraintsError(
+            bad_lines += 1
+            if bad_lines > _MAX_CASE_LINE_ERRORS:
+                problems.add(
+                    f"{CONSTRAINTS_FILE}: '{path}' ({setting}) has more than"
+                    f" {_MAX_CASE_LINE_ERRORS} lines that are not cases; only the first"
+                    f" {_MAX_CASE_LINE_ERRORS} are shown.",
+                    **_at(setting),
+                )
+                break
+            problems.add(
                 f"{CONSTRAINTS_FILE}: line {number} of '{path}' ({setting}) is not a case. Write"
                 ' each case on one line as a JSON object {"input": ..., "expected": ...};'
                 ' "expected" is optional.',
                 **_at(setting),
             )
+            continue
         cases.append(case)
         if len(cases) > _MAX_CASES:
-            raise ConstraintsError(
+            problems.add(
                 f"{CONSTRAINTS_FILE}: '{path}' ({setting}) holds more than {_MAX_CASES} cases.",
                 **_at(setting),
             )
-    if not cases:
-        raise ConstraintsError(
+            break
+    if not cases and not bad_lines:
+        problems.add(
             f"{CONSTRAINTS_FILE}: {setting} names '{path}', which holds no cases.", **_at(setting)
         )
+    problems.raise_any()
     return replace(constraints, cases=tuple(cases))
 
 
@@ -2905,9 +2945,11 @@ def _split_rules(text: str, setting: str, path: str) -> tuple[str, ...]:
         The rules in file order, each joined onto one line.
 
     Raises:
-        ConstraintsError: When the file holds no bullet, more than the maximum
-            bullets, a bullet that is empty or too long, or text outside a bullet.
+        ConstraintsError: With one error for each line of text outside a
+            bullet, and for each bullet that is empty or too long, or when the
+            file holds no bullet or more than the maximum bullets.
     """
+    problems = _Problems()
     rules: list[list[str]] = []
     open_rule = False
     after_blank = False
@@ -2924,20 +2966,21 @@ def _split_rules(text: str, setting: str, path: str) -> tuple[str, ...]:
         elif open_rule and (line[0] in " \t" or not after_blank):
             rules[-1].append(line.strip())
         else:
-            raise ConstraintsError(
+            problems.add(
                 f"{CONSTRAINTS_FILE}: line {number} of '{path}' ({setting}) is not part of a"
                 " top-level bullet. Write each rule as a line that starts with '- '.",
                 **_at(setting),
             )
         after_blank = False
-    if not rules:
-        raise ConstraintsError(
+    # A file whose lines are all bad already has an error for each line.
+    if not rules and not problems.errors:
+        problems.add(
             f"{CONSTRAINTS_FILE}: {setting} names '{path}', which holds no rules. Write each rule"
             " as a line that starts with '- '.",
             **_at(setting),
         )
     if len(rules) > _MAX_RULES:
-        raise ConstraintsError(
+        problems.add(
             f"{CONSTRAINTS_FILE}: '{path}' ({setting}) holds {len(rules)} rules; the most is"
             f" {_MAX_RULES}.",
             **_at(setting),
@@ -2945,11 +2988,12 @@ def _split_rules(text: str, setting: str, path: str) -> tuple[str, ...]:
     joined = [" ".join(part for part in parts if part) for parts in rules]
     for number, rule in enumerate(joined, start=1):
         if not rule or len(rule) > _MAX_RULE_CHARS:
-            raise ConstraintsError(
+            problems.add(
                 f"{CONSTRAINTS_FILE}: rule {number} in '{path}' ({setting}) must be text of 1 to"
                 f" {_MAX_RULE_CHARS} characters.",
                 **_at(setting),
             )
+    problems.raise_any()
     return tuple(joined)
 
 
@@ -2976,15 +3020,22 @@ def _load_mcp_files(
     if not wanted:
         return constraints
     servers: dict[str, tuple[McpServer, ...]] = {}
+    # A file that two roles name is read once, so its errors appear once, at
+    # the first setting that names it, as for rule files.
+    by_path: dict[str, tuple[McpServer, ...]] = {}
     with tarfile.open(archive, "r:gz") as packed:
         members = {str(PurePosixPath(m.name)): m for m in packed.getmembers()}
         for label, role in wanted.items():
             path = role.mcp or ""
-            text = problems.check(_read_text_file, packed, members.get(path), f"{label} mcp", path)
-            if text is not None:
-                servers[label] = problems.check(
-                    _mcp_servers, text, f"{label} mcp", path, problems, default=()
+            if path not in by_path:
+                setting = f"{label} mcp"
+                text = problems.check(_read_text_file, packed, members.get(path), setting, path)
+                by_path[path] = (
+                    problems.check(_mcp_servers, text, setting, path, problems, default=())
+                    if text is not None
+                    else ()
                 )
+            servers[label] = by_path[path]
     return replace(
         constraints,
         proposer=replace(constraints.proposer, mcp_servers=servers.get("[proposer]", ())),

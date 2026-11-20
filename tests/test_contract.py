@@ -28,6 +28,7 @@ from openascent.contract import (
     TargetStage,
     _inside,
     _service_url,
+    _with_lines,
     effective_environment,
     instructions_brief,
     parse_constraints,
@@ -3993,9 +3994,9 @@ def test_a_misspelled_section_gives_no_follow_on_error(raw: bytes, error: tuple)
             b'versio = 1\n[run]\nentry = "run.py:main"\n',
             (
                 1,
-                None,
                 "versio",
-                "ascent.toml: versio is not a supported setting. Did you mean 'version'?",
+                None,
+                "ascent.toml: [versio] is not a supported section. Did you mean 'version'?",
             ),
         ),
     ],
@@ -4005,11 +4006,21 @@ def test_a_misspelled_required_key_gives_no_missing_error(raw: bytes, error: tup
     assert _errors(raw) == [error]
 
 
-def test_an_unknown_array_of_tables_is_named_as_one() -> None:
-    """[[foo]] is named as an array section, and its keys do not count under [run]."""
-    assert _errors(_VALID_RUN + b"[[foo]]\nvcpus = 3\n") == [
-        (4, None, "foo", "ascent.toml: [[foo]] is not a supported section.")
-    ]
+@pytest.mark.parametrize(
+    ("raw", "line"),
+    [(_VALID_RUN + b"[[foo]]\nvcpus = 3\n", 4), (b"version = 1\nfoo = 1\n" + _RUN, 2)],
+    ids=["array", "value"],
+)
+def test_an_unknown_top_level_value_keeps_the_unknown_section_error(raw: bytes, line: int) -> None:
+    """foo = 1 and [[foo]] keep the text and place of an unknown section, so callers see no change.
+
+    The keys under [[foo]] do not count under [run].
+
+    Args:
+        raw: The ascent.toml bytes.
+        line: The line of foo.
+    """
+    assert _errors(raw) == [(line, "foo", None, "ascent.toml: [foo] is not a supported section.")]
 
 
 def test_proposer_setup_text_with_no_entry_also_needs_entry() -> None:
@@ -4196,3 +4207,113 @@ def test_a_quoted_key_with_an_escaped_quote_gets_its_own_line() -> None:
     """A double-quoted key such as "a\\"b" does not end at its escaped quote."""
     raw = _VALID_RUN + b'# one\n"a\\"b" = 1\n'
     assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [(5, "run", 'a"b')]
+
+
+def test_many_errors_under_many_subtable_parents_get_their_lines_fast() -> None:
+    """Each error finds the first subtable of its section with one lookup, not a scan of headers."""
+    text = _VALID_RUN.decode() + "".join(f"[{number}.y]\n" for number in range(9000))
+    errors = [
+        Diagnostic(level=ERROR, file=CONSTRAINTS_FILE, section=str(number), key=None, message="x")
+        for number in range(9000)
+    ]
+    started = time.perf_counter()
+    found = _with_lines(errors, text)
+    # The scan of every header for each error took about 1.9 s here.
+    assert time.perf_counter() - started < 0.3
+    assert [error.line for error in found[:2]] + [found[-1].line] == [4, 5, 9003]
+
+
+@pytest.mark.parametrize(
+    ("body", "error"),
+    [
+        (b'[outcome]\nrequire.acc = 0.9\nrequire.f1 = "x"\n', (6, "outcome.require", "f1")),
+        (b'[target]\nplan.entry = "p.py:f"\nplan.vcpus = 3\n', (6, "target.plan", "vcpus")),
+        (b'[target]\nplan.entry = "p.py:f"\n"plan" . \'vcpus\' = 3\n', (6, "target.plan", "vcpus")),
+    ],
+    ids=["require", "target", "quoted"],
+)
+def test_a_dotted_key_gets_the_line_of_its_last_part(body: bytes, error: tuple) -> None:
+    """require.f1 = "x" is the f1 key of [outcome.require], not the require key of [outcome].
+
+    Args:
+        body: The sections after [run].
+        error: The expected line, section and key.
+    """
+    assert [(line, section, key) for line, section, key, _ in _errors(_VALID_RUN + body)] == [error]
+
+
+def test_each_bad_line_of_the_cases_file_gets_its_own_error(tmp_path: Path) -> None:
+    """Two lines that are not cases give two errors, and no "holds no cases" error."""
+    raw = _VALID_RUN + b'[data]\ncases = "c.jsonl"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "c.jsonl": b"bad\nalso bad\n"})
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    assert [(d.line, d.message) for d in caught.value.errors] == [
+        (
+            5,
+            f"ascent.toml: line {number} of 'c.jsonl' ([data] cases) is not a case. Write each"
+            ' case on one line as a JSON object {"input": ..., "expected": ...}; "expected" is'
+            " optional.",
+        )
+        for number in (1, 2)
+    ]
+
+
+def test_a_cases_file_of_bad_lines_reports_only_the_first_hundred(tmp_path: Path) -> None:
+    """A large file of bad lines gives 100 line errors and one that says more are left out."""
+    raw = _VALID_RUN + b'[data]\ncases = "c.jsonl"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "c.jsonl": b"bad\n" * 5000})
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    errors = caught.value.errors
+    assert len(errors) == 101
+    assert "line 100 of" in errors[99].message
+    assert "more than 100 lines that are not cases" in errors[100].message
+
+
+def test_each_stray_line_of_a_rule_file_gets_its_own_error(tmp_path: Path) -> None:
+    """Two lines outside a bullet give two errors, and no "holds no rules" error."""
+    raw = _VALID_RUN + b'illegal = "r.md"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "r.md": b"stray one\n\nstray two\n"})
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    assert [(d.line, d.section, d.key) for d in caught.value.errors] == [(4, "run", "illegal")] * 2
+    assert ["line 1 of" in d.message for d in caught.value.errors] == [True, False]
+    assert "line 3 of" in caught.value.errors[1].message
+
+
+def test_a_bad_mcp_file_that_two_roles_name_gets_one_error(tmp_path: Path) -> None:
+    """A shared MCP file is read once, so its error appears once, at the first setting."""
+    raw = (
+        b'version = 1\n[proposer]\nentry = ["node", "a.js"]\nmcp = ".mcp.json"\n'
+        b'[run]\nentry = "run.py:main"\nmcp = ".mcp.json"\n'
+    )
+    mcp = b'{"mcpServers": {"m": {"type": "HTTP", "url": "https://a.example.com/mcp"}}}'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "a.js": b"", ".mcp.json": mcp})
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive)
+
+    assert [(d.line, d.section, d.key) for d in caught.value.errors] == [(4, "proposer", "mcp")]
+
+
+def test_a_good_mcp_file_that_two_roles_name_gives_both_its_servers(tmp_path: Path) -> None:
+    """Each role that names a shared MCP file gets its servers."""
+    raw = (
+        b'version = 1\n[proposer]\nentry = ["node", "a.js"]\nmcp = ".mcp.json"\n'
+        b'[run]\nentry = "run.py:main"\nmcp = ".mcp.json"\n'
+    )
+    mcp = b'{"mcpServers": {"m": {"url": "https://a.example.com/mcp"}}}'
+    constraints = read_constraints(
+        _archive(tmp_path, {CONSTRAINTS_FILE: raw, "a.js": b"", ".mcp.json": mcp})
+    )
+    assert constraints is not None
+
+    assert constraints.proposer.mcp_servers == constraints.run_role.mcp_servers
+    assert [server.name for server in constraints.run_role.mcp_servers] == ["m"]
