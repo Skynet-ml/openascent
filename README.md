@@ -184,7 +184,7 @@ To add the package to any image, add one line with a pinned version, for example
 RUN pip install openascent==<version>
 ```
 
-`ascent check --image` ships in the first release after 0.1.0, so pin that release or a later one.
+`ascent check --image` ships in 0.2.0, so pin 0.2.0 or a later release.
 
 The image needs Python 3.12 or later.
 
@@ -467,7 +467,7 @@ The package does not validate records. It has no dependency for that. Use a JSON
 Install from PyPI, with a pinned version:
 
 ```sh
-pip install openascent==0.1.0
+pip install openascent==0.2.0
 ```
 
 Or install from the repository, at a release tag:
