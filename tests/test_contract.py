@@ -3527,10 +3527,10 @@ _SETUP_CONTROL_CHARS = [
     r"\u001f",
     r"\u007f",
     r"\u0085",
-    r"؜",
-    r"‎",
-    r"‮",
-    r"⁦",
+    r"\u061c",
+    r"\u200e",
+    r"\u202e",
+    r"\u2066",
 ]
 
 
@@ -3573,11 +3573,11 @@ def test_a_setup_command_with_a_zwj_or_surrounding_newlines_is_kept(section: str
         section: The table under test.
     """
     key = "command" if section == "setup" else "setup"
-    raw = f'version = 1\n[{section}]\n{key} = """\nnpm ci ‍\n"""\n'.encode() + _RUN
+    raw = f'version = 1\n[{section}]\n{key} = """\nnpm ci \\u200d\n"""\n'.encode() + _RUN
 
     constraints = parse_constraints(raw)
     command = constraints.setup_command if section == "setup" else constraints.metric.setup
-    assert command == "npm ci ‍"
+    assert command == "npm ci \u200d"
 
 
 @pytest.mark.parametrize("char", _SETUP_CONTROL_CHARS)
