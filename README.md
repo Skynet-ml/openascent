@@ -159,7 +159,7 @@ The command prints one JSON object on stdout:
 
 ```json
 {
-  "sdk_version": "0.1.0",
+  "sdk_version": "<version>",
   "protocol_version": 1,
   "role": "metric",
   "python": "/usr/local/bin/python3.12",
@@ -172,7 +172,7 @@ The command prints one JSON object on stdout:
 }
 ```
 
-- `sdk_version` is the version of the package. `protocol_version` is the version of the protocol that the package speaks.
+- `sdk_version` is the version of the installed package. `protocol_version` is the version of the protocol that the package speaks.
 - `ok` is `true` exactly when each check passed.
 - `python` is present only for the `metric` role. It is `null` when the `python_runtime` check failed.
 - The exit code is 0 when each check passed, and 1 when a check failed.
@@ -181,8 +181,10 @@ The command prints one JSON object on stdout:
 To add the package to any image, add one line with a pinned version, for example in a Dockerfile:
 
 ```dockerfile
-RUN pip install openascent==0.1.0
+RUN pip install openascent==<version>
 ```
+
+`ascent check --image` ships in the first release after 0.1.0, so pin that release or a later one.
 
 The image needs Python 3.12 or later.
 
