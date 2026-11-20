@@ -4465,3 +4465,14 @@ def test_the_named_files_are_checked_only_when_ascent_toml_has_no_error(tmp_path
     with pytest.raises(ConstraintsError) as caught:
         read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: fixed}))
     assert [(d.line, d.key) for d in caught.value.errors] == [(4, "illegal")]
+
+
+def test_a_repeated_metric_file_does_not_skip_the_entry_check() -> None:
+    """A repeated path is a valid path, so a command entry that runs no metric file still fails."""
+    raw = _VALID_RUN + b'[metric]\nfiles = ["m.sh", "m.sh"]\nentry = ["bash", "x.sh"]\n'
+
+    errors = _errors(raw)
+
+    assert [(line, key) for line, _, key, _ in errors] == [(5, "files"), (6, "entry")]
+    assert "[metric] files holds 'm.sh' more than once." in errors[0][3]
+    assert "[metric] entry ['bash', 'x.sh'] runs no file from [metric] files." in errors[1][3]

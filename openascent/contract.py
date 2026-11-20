@@ -944,6 +944,25 @@ def _paths(
         The valid paths, each once, so one bad path hides no check of the others;
         ``None`` when the key is absent or the value is not a bounded list.
     """
+    paths = _path_items(section, key, problems, section_name)
+    return None if paths is None else _distinct(paths, f"[{section_name}] {key}", problems)
+
+
+def _path_items(
+    section: Mapping[str, Any], key: str, problems: _Problems, section_name: str
+) -> list[str] | None:
+    """Read the valid paths of one list, in file order, with any repeats kept.
+
+    Args:
+        section: The parsed table.
+        key: The setting, such as ``editable`` or ``files``.
+        problems: Records each error of the list's shape and of each path.
+        section_name: The table's name, used in errors.
+
+    Returns:
+        The cleaned valid paths, or ``None`` when the key is absent or the
+        value is not a bounded list.
+    """
     if key not in section:
         return None
     setting = f"[{section_name}] {key}"
@@ -955,7 +974,7 @@ def _paths(
         )
         return None
     paths = [problems.check(_clean_path, value, setting) for value in values]
-    return _distinct([path for path in paths if path is not None], setting, problems)
+    return [path for path in paths if path is not None]
 
 
 def _text(value: Any, setting: str, limit: int) -> str:
@@ -2034,8 +2053,10 @@ def _metric(section: Mapping[str, Any], problems: _Problems) -> MetricSpec:
         The section, with the default exploit folder when none is set.
     """
     errors = len(problems.errors)
-    files = _paths(section, "files", problems, "metric") or ()
+    items = _path_items(section, "files", problems, "metric")
+    # A repeated path is still a valid path, so only a bad path or list makes files invalid.
     files_valid = len(problems.errors) == errors
+    files = () if items is None else _distinct(items, "[metric] files", problems)
     exploits = problems.check(_metric_path, section, "exploits") or _DEFAULT_EXPLOITS
     reference = problems.check(_metric_path, section, "reference")
     # The runtime hides these paths from the agent, so "." would hide the whole repository.
