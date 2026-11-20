@@ -324,17 +324,17 @@ def test_check_reports_a_timeout_too_large_for_a_float(tmp_path, capsys):
     )
 
 
-def test_check_reports_an_error_with_no_section_without_a_place(tmp_path, capsys):
-    """A file that is not TOML has no line, section or key, so the line names only the file.
+def test_check_reports_a_toml_syntax_error_at_its_line(tmp_path, capsys):
+    """A TOML syntax error has no section or key, but the report gives the line of the error.
 
     Args:
         tmp_path: Scratch folder.
         capsys: Captures the report.
     """
-    path = _write(tmp_path, b"version = \n")
+    path = _write(tmp_path, b"version = 1\n[run\n")
     assert main(["check", path]) == 1
     first, count = capsys.readouterr().out.splitlines()
-    assert first.startswith(f"{path}: error: ascent.toml is not valid TOML:")
+    assert first.startswith(f"{path}:2: error: ascent.toml is not valid TOML:")
     assert count == "1 error, 0 warnings"
 
 
@@ -390,22 +390,26 @@ def test_every_example_contract_passes_ascent_check(capsys):
         assert main(["check", str(path)]) == 0, capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("total", "hidden"),
+    [(600, "100 more errors are not shown."), (501, "1 more error is not shown.")],
+)
 def test_check_counts_every_error_of_a_capped_check(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], total: int, hidden: str
 ) -> None:
-    """A check of 600 errors shows 500 and a count line, and the last line counts all 600.
+    """A capped check shows 500 errors and a count line, and the last line counts them all.
 
     Args:
         tmp_path: Scratch folder.
         capsys: Captures the report.
+        total: The number of errors in the file.
+        hidden: The count line of the errors that are not shown.
     """
-    unknown = "".join(f"k{n} = 1\n" for n in range(600))
+    unknown = "".join(f"k{n} = 1\n" for n in range(total))
     path = _write(tmp_path, f'version = 1\n[run]\nentry = "run.py:main"\n{unknown}'.encode())
 
     assert main(["check", path]) == 1
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 502
-    assert lines[-2] == (
-        f"{path}: error: 100 more errors are not shown. Fix the errors above and check again."
-    )
-    assert lines[-1] == "600 errors, 0 warnings"
+    assert lines[-2] == f"{path}: error: {hidden} Fix the errors above and check again."
+    assert lines[-1] == f"{total} errors, 0 warnings"

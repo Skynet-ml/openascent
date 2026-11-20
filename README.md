@@ -221,6 +221,7 @@ The module `openascent.contract` reads and checks `ascent.toml`. It uses only th
 - An invalid file raises `ConstraintsError`. One check finds every mistake in the file. `error.errors` holds them all, in a fixed order, as `Diagnostic` values.
 - Each `Diagnostic` has a `level` (`"error"` or `"warning"`), a `file`, a `line`, a `section`, a `key` and a `message`. The message says what is wrong and how to fix it.
 - `line` is the line of the key. When the key is not in the file, it is the line of the section header. When the section is not in the file either, it is `None`.
+- A TOML syntax error has the line of the error.
 - The text of the error, `error.section` and `error.key` are those of the first diagnostic, for example `"metric"` and `"entry"`. Each is `None` when the error has no such place.
 - Only a file that is too large, or that is not valid TOML, stops the check at the first error.
 - `read_constraints` checks the named files only when `ascent.toml` itself has no error. When `ascent.toml` has an error, the error lists only the mistakes of `ascent.toml`. Fix them, then check again to see the mistakes of the named files.

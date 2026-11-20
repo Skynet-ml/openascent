@@ -59,6 +59,8 @@ _MAX_CASES = 200_000
 _MAX_CASE_LINE_ERRORS = 100
 # One check reports at most this many errors, however many files have errors.
 _MAX_ERRORS = 500
+# tomllib before Python 3.14 has no lineno on its error, only this text in the message.
+_TOML_ERROR_LINE = re.compile(r"\(at line (\d+), column \d+\)")
 _CASE_KEYS = frozenset({"input", "expected"})
 _MAX_COMMAND_CHARS = 300
 _MAX_RULES = 50
@@ -286,7 +288,8 @@ class _Problems:
                 errors.append(
                     Diagnostic(
                         level=ERROR,
-                        message=f"{CONSTRAINTS_FILE}: {hidden} more errors are not shown. Fix"
+                        message=f"{CONSTRAINTS_FILE}: {hidden} more"
+                        f" {'error is' if hidden == 1 else 'errors are'} not shown. Fix"
                         " the errors above and check again.",
                     )
                 )
@@ -2295,6 +2298,26 @@ def _refuse_hidden_visible_files(
     problems.raise_any()
 
 
+def _toml_error(error: tomllib.TOMLDecodeError) -> ConstraintsError:
+    """Build the error of a TOML syntax error, with the line of the error.
+
+    Python 3.14 gives the line as ``error.lineno``; older versions give it
+    only in the message, as "(at line N, column M)".
+
+    Args:
+        error: The error that ``tomllib`` raised.
+
+    Returns:
+        The error, with one diagnostic that has the line when it is known.
+    """
+    line = getattr(error, "lineno", None)
+    if line is None:
+        match = _TOML_ERROR_LINE.search(str(error))
+        line = int(match.group(1)) if match else None
+    message = f"{CONSTRAINTS_FILE} is not valid TOML: {error}"
+    return ConstraintsError(message, errors=(Diagnostic(level=ERROR, line=line, message=message),))
+
+
 def parse_constraints(
     raw: bytes, *, require_version: bool = True, limits: RunnerLimits = RunnerLimits()
 ) -> RepoConstraints:
@@ -2326,8 +2349,10 @@ def parse_constraints(
     try:
         text = raw.decode("utf-8")
         document = tomllib.loads(text)
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+    except UnicodeDecodeError as error:
         raise ConstraintsError(f"{CONSTRAINTS_FILE} is not valid TOML: {error}") from error
+    except tomllib.TOMLDecodeError as error:
+        raise _toml_error(error) from error
     except RecursionError as error:
         # tomllib recurses once for each nested array, so deep nesting under the size limit
         # overflows the stack; Skynet's own parser crashes on this input.

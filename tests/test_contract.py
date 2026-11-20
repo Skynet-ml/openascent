@@ -1277,6 +1277,13 @@ def test_a_toml_file_nested_too_deeply_fails_as_not_valid_toml() -> None:
     assert (caught.value.section, caught.value.key) == (None, None)
 
 
+def test_a_toml_syntax_error_has_the_line_of_the_error() -> None:
+    """A TOML syntax error is one diagnostic, at the line that tomllib names."""
+    with pytest.raises(ConstraintsError, match=r"^ascent\.toml is not valid TOML: ") as caught:
+        parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\ntimeout = \n')
+    assert [(d.line, d.section, d.key) for d in caught.value.errors] == [(4, None, None)]
+
+
 _V1_RUN = b"version = 1\n" + _RUN
 _STAGE = 'version = 1\n[target.solver]\nentry = "solver.py:solve"\n'
 
