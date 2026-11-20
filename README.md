@@ -129,6 +129,65 @@ It prints:
 
 The `examples` folder holds the same exact-match metric in Python, Node.js, Go, Rust and POSIX sh.
 
+## The `ascent check --image` command
+
+`ascent check --image --role <candidate|metric>` runs inside a box and checks that the box image speaks the protocol.
+The user image only gives the tools. The OpenAscent package in the image speaks the protocol.
+A runner runs this command in each image before the run. A non-zero exit fails the run.
+The command needs no network. A role runs at most three subprocesses, and each one stops after 8 seconds, so a role ends in about 24 seconds.
+
+The `metric` role checks:
+
+| Check | What it proves |
+| --- | --- |
+| `python_runtime` | The trusted Python runtime exists and runs. The report gives its absolute path in `python`. |
+| `ascent_score` | `ascent score` works end to end with that runtime: a built-in sample metric gets a sample input and returns a valid result. |
+| `temp_dir` | A temporary directory is writable. |
+
+The `candidate` role checks:
+
+| Check | What it proves |
+| --- | --- |
+| `ascent_command` | The `ascent` command is on `PATH` and runs. |
+| `package_import` | The Python runtime imports the `openascent` package at the version of the command. |
+| `shell` | A shell at `/bin/sh` runs a command. |
+| `temp_dir` | A temporary directory is writable. |
+
+The trusted Python runtime is the interpreter that runs the `ascent` command.
+
+The command prints one JSON object on stdout:
+
+```json
+{
+  "sdk_version": "<version>",
+  "protocol_version": 1,
+  "role": "metric",
+  "python": "/usr/local/bin/python3.12",
+  "ok": true,
+  "checks": [
+    {"name": "python_runtime", "ok": true, "message": "/usr/local/bin/python3.12 runs Python 3.12.16."},
+    {"name": "ascent_score", "ok": true, "message": "The sample metric returned a valid result with score 1.0."},
+    {"name": "temp_dir", "ok": true, "message": "/tmp is writable."}
+  ]
+}
+```
+
+- `sdk_version` is the version of the installed package. `protocol_version` is the version of the protocol that the package speaks.
+- `ok` is `true` exactly when each check passed.
+- `python` is present only for the `metric` role. It is `null` when the `python_runtime` check failed.
+- The exit code is 0 when each check passed, and 1 when a check failed.
+- No `--role`, a wrong role, or no `--image` is a usage error: the command prints the usage on stderr and exits with code 2.
+
+To add the package to any image, add one line with a pinned version, for example in a Dockerfile:
+
+```dockerfile
+RUN pip install openascent==<version>
+```
+
+`ascent check --image` ships in the first release after 0.1.0, so pin that release or a later one.
+
+The image needs Python 3.12 or later.
+
 ## A short metric
 
 In bash, with jq:
@@ -405,7 +464,13 @@ The package does not validate records. It has no dependency for that. Use a JSON
 
 ## Install
 
-Install from the repository, at a release tag:
+Install from PyPI, with a pinned version:
+
+```sh
+pip install openascent==0.1.0
+```
+
+Or install from the repository, at a release tag:
 
 ```sh
 pip install git+https://github.com/Skynet-ml/openascent@<tag>
