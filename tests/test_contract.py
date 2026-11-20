@@ -2515,11 +2515,11 @@ def test_each_http_type_in_lower_case_is_accepted(tmp_path: Path, kind: str) -> 
     )
 
 
-@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP", "SSE", "STDIO"])
+@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP", "SSE"])
 def test_an_mcp_type_not_in_lower_case_names_the_server_and_the_three_types(
     tmp_path: Path, kind: str
 ) -> None:
-    """The parser does not convert the type, so ``HTTP`` and ``STDIO`` get the type error."""
+    """The parser does not convert the type, so ``HTTP`` gets the type error."""
     server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
 
     with pytest.raises(ConstraintsError) as error:
@@ -4534,3 +4534,360 @@ def test_a_section_that_is_not_a_table_gives_no_follow_on_error(
 ) -> None:
     """A top-level value that is not a table gets its own error, and the rules that read it none."""
     assert _errors(raw) == [expected]
+
+
+@pytest.mark.parametrize("kind", ["STDIO", "Stdio"])
+def test_a_stdio_type_in_any_case_gets_the_stdio_advice(tmp_path: Path, kind: str) -> None:
+    """A stdio type not in lower case still fails, with the advice for a stdio server."""
+    server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
+
+    for legacy_forms in (False, True):
+        with pytest.raises(ConstraintsError) as error:
+            read_constraints(_archive(tmp_path, _mcp_files(server)), legacy_forms=legacy_forms)
+
+        assert str(error.value) == (
+            "ascent.toml: [run] mcp file 'roles/.mcp.json': server 'm' is a stdio server (command,"
+            ' args, env). Only http servers are supported now; give it a "url" and put each'
+            ' secret in "headers" as ${NAME}.'
+        )
+        assert len(error.value.errors) == 1
+
+
+# Each form that the older Skynet reader accepted and normalized (SKY-760): the
+# ascent.toml text after the [run] section, and the field it fills.
+_LEGACY = {
+    "setup-spaces": (b'[setup]\ncommand = "  pip install x  "\n', "setup_command", "pip install x"),
+    "setup-line-break": (
+        b'[setup]\ncommand = "pip install x\\n"\n',
+        "setup_command",
+        "pip install x",
+    ),
+    "metric-setup": (b'[metric]\nsetup = " make "\n', "metric.setup", "make"),
+    "path-spaces": (b'[paths]\neditable = [" src "]\n', "editable_paths", ("src",)),
+    "path-backslash": (b'[paths]\neditable = ["src\\\\a"]\n', "editable_paths", ("src/a",)),
+    "path-trailing-slash": (b'[paths]\neditable = ["src/"]\n', "editable_paths", ("src",)),
+    "protected-trailing-slash": (
+        b'[paths]\nprotected = ["eval/"]\n',
+        "protected_paths",
+        ("eval",),
+    ),
+    "metric-files-trailing-slash": (
+        b'[metric]\nfiles = ["scoring/"]\n',
+        "metric.files",
+        ("scoring",),
+    ),
+    "upper-host": (b'network = ["API.Example.com"]\n', "run_role.network", ("api.example.com",)),
+    "setup-lines": (
+        b'[setup]\ncommand = """\npip install x\nnpm ci\n"""\n',
+        "setup_command",
+        "pip install x\nnpm ci",
+    ),
+    "setup-tab": (b'[setup]\ncommand = "pip\\tinstall x"\n', "setup_command", "pip\tinstall x"),
+    "metric-setup-lines": (
+        b'[metric]\nsetup = """\nmake\nmake test\n"""\n',
+        "metric.setup",
+        "make\nmake test",
+    ),
+    "metric-entry-control": (
+        b'[metric]\nfiles = ["m.sh"]\nentry = ["./m.sh", "a\\tb"]\n',
+        "metric.entry",
+        ("./m.sh", "a\tb"),
+    ),
+    "editable-repeat": (b'[paths]\neditable = ["src", "src"]\n', "editable_paths", ("src",)),
+    "editable-repeat-slash": (
+        b'[paths]\neditable = ["src", "src/"]\n',
+        "editable_paths",
+        ("src",),
+    ),
+    "protected-repeat-backslash": (
+        b"[paths]\nprotected = ['a\\b', 'a/b']\n",
+        "protected_paths",
+        ("a/b",),
+    ),
+    "metric-files-repeat": (
+        b'[metric]\nfiles = ["m.py", "m.py/"]\n',
+        "metric.files",
+        ("m.py",),
+    ),
+    "network-repeat": (
+        b'network = ["API.example.com", "api.example.com"]\n',
+        "run_role.network",
+        ("api.example.com",),
+    ),
+    "services-repeat": (
+        b'services = ["svc", "svc"]\n[services.svc]\nurl = "https://svc.example.com"\n',
+        "run_role.services",
+        ("svc",),
+    ),
+    "services-spaces": (
+        b'services = [" svc"]\n[services.svc]\nurl = "https://svc.example.com"\n',
+        "run_role.services",
+        ("svc",),
+    ),
+}
+
+
+# The start of the one error that the default gives for each old form, after "ascent.toml: ".
+_LEGACY_ERRORS = {
+    "editable-repeat": "[paths] editable holds 'src' more than once",
+    "editable-repeat-slash": "'src/' in [paths] editable must be written 'src'",
+    "metric-entry-control": '[metric] entry must be "path/to/file.py:function"',
+    "metric-files-repeat": "'m.py/' in [metric] files must be written 'm.py'",
+    "metric-files-trailing-slash": "'scoring/' in [metric] files must be written 'scoring'",
+    "metric-setup": "[metric] setup must not start or end",
+    "metric-setup-lines": "[metric] setup must not start or end",
+    "network-repeat": "[run] network entry 'API.example.com' must be in lower case",
+    "path-backslash": "'src\\a' in [paths] editable must be written 'src/a'",
+    "path-spaces": "' src ' in [paths] editable must be written 'src'",
+    "path-trailing-slash": "'src/' in [paths] editable must be written 'src'",
+    "protected-repeat-backslash": "'a\\b' in [paths] protected must be written 'a/b'",
+    "protected-trailing-slash": "'eval/' in [paths] protected must be written 'eval'",
+    "services-repeat": "[run] services holds 'svc' more than once",
+    "services-spaces": "[run] services must not start or end",
+    "setup-line-break": "[setup] command must not start or end",
+    "setup-lines": "[setup] command must not start or end",
+    "setup-spaces": "[setup] command must not start or end",
+    "setup-tab": "[setup] command must be one command without control characters",
+    "upper-host": "[run] network entry 'API.Example.com' must be in lower case",
+}
+
+
+def _field(constraints: RepoConstraints, name: str) -> object:
+    """Return a field of the proposal named by a dotted path, such as ``metric.setup``."""
+    value: object = constraints
+    for part in name.split("."):
+        value = getattr(value, part)
+    return value
+
+
+@pytest.mark.parametrize("form", sorted(_LEGACY))
+def test_legacy_forms_normalize_each_old_form(form: str) -> None:
+    """With legacy_forms, each old form is read the way the older reader normalized it."""
+    setting, name, expected = _LEGACY[form]
+    raw = _VALID_RUN + setting
+
+    assert _field(parse_constraints(raw, legacy_forms=True), name) == expected
+
+
+@pytest.mark.parametrize("form", sorted(_LEGACY))
+def test_the_default_still_refuses_each_old_form(form: str) -> None:
+    """Without legacy_forms, each old form still fails, as before."""
+    raw = _VALID_RUN + _LEGACY[form][0]
+
+    for kwargs in ({}, {"legacy_forms": False}):
+        with pytest.raises(ConstraintsError) as error:
+            parse_constraints(raw, **kwargs)
+        assert len(error.value.errors) == 1
+        assert error.value.errors[0].message.startswith(f"ascent.toml: {_LEGACY_ERRORS[form]}")
+
+
+def test_legacy_forms_keep_every_other_rule() -> None:
+    """legacy_forms cleans only the old forms; each other error still fails."""
+    raw = _VALID_RUN + (
+        b'network = ["https://api.example.com"]\n'
+        b'[paths]\neditable = ["/abs", "src/", "src"]\nprotected = ["a*"]\n'
+    )
+
+    with pytest.raises(ConstraintsError) as error:
+        parse_constraints(raw, legacy_forms=True)
+
+    assert sorted(d.message for d in error.value.errors) == [
+        "ascent.toml: '/abs' in [paths] editable must be relative and stay inside the repository.",
+        "ascent.toml: 'a*' in [paths] protected looks like a pattern. Patterns are not supported;"
+        " name the files or folders.",
+        "ascent.toml: [run] network entry 'https://api.example.com' must be a host name such as"
+        " api.example.com, not a URL. Use network = [] for no network.",
+    ]
+
+
+def test_legacy_forms_clean_the_path_part_of_an_entry() -> None:
+    """With legacy_forms, the path of a Python entry is cleaned, as the older reader did."""
+    raw = b"version = 1\n[run]\nentry = ' src\\run.py:main'\n"
+
+    assert parse_constraints(raw, legacy_forms=True).run_entry == "src/run.py:main"
+    with pytest.raises(ConstraintsError, match="Write 'src/run.py:main'"):
+        parse_constraints(raw)
+
+
+def test_legacy_forms_clean_the_paths_of_the_named_files(tmp_path: Path) -> None:
+    """With legacy_forms, read_constraints reads each named file from its cleaned path."""
+    raw = (
+        b"version = 1\ninstructions = ' docs\\intent.md '\n"
+        b"[run]\nentry = \"run.py:main\"\nmcp = 'roles\\.mcp.json'\nillegal = 'docs/rules.md/'\n"
+        b"[data]\ncases = ' data\\cases.jsonl'\n"
+        b"[sandbox]\ncompose = 'deploy/compose.yml/'\n"
+    )
+    archive = _archive(
+        tmp_path,
+        {
+            CONSTRAINTS_FILE: raw,
+            "docs/intent.md": b"Keep the reply format.\n",
+            "roles/.mcp.json": b'{"mcpServers": {"m": {"type": "HTTP",'
+            b' "url": "https://a.example.com/mcp"}}}',
+            "docs/rules.md": b"- Do not call the network.\n",
+            "data/cases.jsonl": b'{"input": 1}\n',
+            "deploy/compose.yml": b"services: {}\n",
+        },
+    )
+
+    constraints = read_constraints(archive, legacy_forms=True, compose_parser=lambda text: ("db",))
+
+    assert constraints is not None
+    assert constraints.instructions_file == "docs/intent.md"
+    assert constraints.intent == "Keep the reply format."
+    assert constraints.run_role.mcp == "roles/.mcp.json"
+    assert constraints.run_role.mcp_servers == (
+        McpServer(name="m", url="https://a.example.com/mcp", headers={}),
+    )
+    assert constraints.run_role.illegal_file == "docs/rules.md"
+    assert constraints.run_role.illegal == ("Do not call the network.",)
+    assert constraints.cases_file == "data/cases.jsonl"
+    assert constraints.cases == ({"input": 1},)
+    assert constraints.compose_file == "deploy/compose.yml"
+    assert constraints.compose_services == ("db",)
+    with pytest.raises(ConstraintsError) as error:
+        read_constraints(archive, compose_parser=lambda text: ("db",))
+    assert len(error.value.errors) == 5
+
+
+@pytest.mark.parametrize("host", ["localhost", "10.0.0.1:8080", "127.0.0.1", "LOCALHOST"])
+def test_legacy_forms_still_refuse_a_network_host_that_is_not_public(host: str) -> None:
+    """The one difference from the older reader: a non-public network host fails in both modes.
+
+    The network list comes from the repository, so an internal host would let a run reach it.
+    """
+    raw = _VALID_RUN + b'network = ["' + host.encode() + b'"]\n'
+
+    for legacy_forms in (False, True):
+        with pytest.raises(ConstraintsError, match="must name a public host"):
+            parse_constraints(raw, legacy_forms=legacy_forms)
+
+
+@pytest.mark.parametrize("legacy_forms", [False, True])
+def test_a_network_host_that_is_not_public_is_named_as_written(legacy_forms: bool) -> None:
+    """The public-host error quotes the entry as the file writes it, also under legacy_forms."""
+    raw = _VALID_RUN + b'network = ["LOCALHOST"]\n'
+
+    with pytest.raises(ConstraintsError) as error:
+        parse_constraints(raw, legacy_forms=legacy_forms)
+
+    assert [d.message for d in error.value.errors] == [
+        "ascent.toml: [run] network entry 'LOCALHOST' must name a public host such as"
+        " api.example.com, not an IP address or localhost."
+    ]
+
+
+@pytest.mark.parametrize(
+    ("setting", "message"),
+    [
+        (
+            b'[setup]\ncommand = "' + b"x" * 300 + b'   "\n',
+            "[setup] command must be text of 1 to 300 characters.",
+        ),
+        (
+            b'[metric]\nsetup = "' + b"x" * 300 + b'   "\n',
+            "[metric] setup must be text of 1 to 300 characters.",
+        ),
+        (
+            b'services = ["' + b"s" * 100 + b' "]\n',
+            "[run] services must be text of 1 to 100 characters.",
+        ),
+    ],
+)
+def test_legacy_forms_check_the_length_before_the_strip(setting: bytes, message: str) -> None:
+    """With legacy_forms, the limit applies to the raw value, as in the older reader."""
+    with pytest.raises(ConstraintsError) as error:
+        parse_constraints(_VALID_RUN + setting, legacy_forms=True)
+
+    assert [d.message for d in error.value.errors] == [f"ascent.toml: {message}"]
+
+
+def test_legacy_forms_check_the_host_before_the_lower_case() -> None:
+    """A non-ASCII letter that lowers to ASCII, such as the Kelvin sign, still fails."""
+    raw = _VALID_RUN + 'network = ["\u212aexample.com"]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match="must be a host name"):
+        parse_constraints(raw, legacy_forms=True)
+
+
+def test_legacy_forms_end_with_a_call_that_fails() -> None:
+    """A legacy call that raises leaves the next default call strict."""
+    with pytest.raises(ConstraintsError):
+        parse_constraints(_VALID_RUN + b'[paths]\neditable = ["/abs"]\n', legacy_forms=True)
+
+    with pytest.raises(ConstraintsError, match="must be written 'src'"):
+        parse_constraints(_VALID_RUN + b'[paths]\neditable = ["src/"]\n')
+
+
+def test_legacy_forms_end_with_the_call() -> None:
+    """The option lasts for one call only, so a later default call is strict again."""
+    raw = _VALID_RUN + b'[paths]\neditable = ["src/"]\n'
+
+    parse_constraints(raw, legacy_forms=True)
+
+    with pytest.raises(ConstraintsError, match="must be written 'src'"):
+        parse_constraints(raw)
+
+
+def test_read_constraints_ends_legacy_forms_with_the_call(tmp_path: Path) -> None:
+    """read_constraints resets the option after a legacy call that succeeds or raises."""
+    (tmp_path / "good").mkdir()
+    (tmp_path / "bad").mkdir()
+    good = _archive(
+        tmp_path / "good", {CONSTRAINTS_FILE: _VALID_RUN + b'[paths]\neditable = ["src/"]\n'}
+    )
+    bad = _archive(
+        tmp_path / "bad", {CONSTRAINTS_FILE: _VALID_RUN + b'[paths]\neditable = ["/abs"]\n'}
+    )
+
+    read_constraints(good, legacy_forms=True)
+    with pytest.raises(ConstraintsError, match="must be written 'src'"):
+        read_constraints(good)
+
+    with pytest.raises(ConstraintsError):
+        read_constraints(bad, legacy_forms=True)
+    with pytest.raises(ConstraintsError, match="must be written 'src'"):
+        read_constraints(good)
+
+
+@pytest.mark.parametrize("key", ["entry", "setup"])
+def test_legacy_forms_still_refuse_a_control_character_in_a_proposer_command(key: str) -> None:
+    """With legacy_forms, [proposer] entry and setup still refuse a control character."""
+    entry = "" if key == "entry" else 'entry = ["node", "agent.js"]\n'
+    raw = _VALID_RUN + f'[proposer]\n{entry}{key} = ["node", "a\\tb"]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=rf"\[proposer\] {key} must be a command list"):
+        parse_constraints(raw, legacy_forms=True)
+
+
+def test_legacy_forms_give_the_same_proposal_for_a_file_in_its_one_form() -> None:
+    """A file already in its one form reads the same with or without legacy_forms."""
+    raw = _CFCA + _RUN
+
+    assert parse_constraints(raw, legacy_forms=True) == parse_constraints(raw)
+
+
+@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP", "SSE"])
+def test_legacy_forms_match_an_mcp_type_in_any_case(tmp_path: Path, kind: str) -> None:
+    """With legacy_forms, read_constraints matches the type of an MCP server in any case."""
+    server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
+
+    constraints = read_constraints(_archive(tmp_path, _mcp_files(server)), legacy_forms=True)
+
+    assert constraints is not None
+    assert constraints.run_role.mcp_servers == (
+        McpServer(name="m", url="https://a.example.com/mcp", headers={}),
+    )
+
+
+def test_read_constraints_passes_legacy_forms_to_the_toml_check(tmp_path: Path) -> None:
+    """read_constraints with legacy_forms also reads the old forms of ascent.toml."""
+    raw = _VALID_RUN + b'[paths]\neditable = ["src/"]\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
+
+    constraints = read_constraints(archive, legacy_forms=True)
+
+    assert constraints is not None
+    assert constraints.editable_paths == ("src",)
+    with pytest.raises(ConstraintsError, match="must be written 'src'"):
+        read_constraints(archive)

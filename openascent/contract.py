@@ -42,6 +42,7 @@ import socket
 import tarfile
 import tomllib
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, TypedDict
@@ -865,6 +866,11 @@ class RepoEnvironment:
         }
 
 
+# Each parse_constraints or read_constraints call sets this to its legacy_forms value and
+# resets it when the call ends, so the deep helpers need no extra argument.
+_LEGACY_FORMS: ContextVar[bool] = ContextVar("openascent_legacy_forms", default=False)
+
+
 def _clean_path(raw: Any, setting: str) -> str:
     """Check one repository-relative path from the file, which must be in its one valid form.
 
@@ -873,12 +879,15 @@ def _clean_path(raw: Any, setting: str) -> str:
         setting: The setting it came from, such as ``[paths] editable``, named in errors.
 
     Returns:
-        The path as written; ``.`` for the whole tree.
+        The path as written; ``.`` for the whole tree. Under ``legacy_forms``,
+        the cleaned path: stripped, ``\\`` changed to ``/``, and no ``/`` at
+        the start or the end, as the older reader gave it.
 
     Raises:
         ConstraintsError: When the value is not a path inside the repository, is
-            a pattern, or is not written in its one form: ``/`` between folders,
-            and no space or ``/`` at the start or the end.
+            a pattern, or, unless under ``legacy_forms``, is not written in its
+            one form: ``/`` between folders, and no space or ``/`` at the start
+            or the end.
     """
     if not isinstance(raw, str):
         raise ConstraintsError(
@@ -909,7 +918,8 @@ def _clean_path(raw: Any, setting: str) -> str:
             **_at(setting),
         )
     # The parser does not convert a path, so the file says exactly what the run protects.
-    if clean != raw:
+    # A run that started under the older reader keeps the cleaned path that reader used.
+    if clean != raw and not _LEGACY_FORMS.get():
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: '{raw}' in {setting} must be written '{clean}': '/' between"
             " folders, and no space or '/' at the start or the end.",
@@ -921,6 +931,9 @@ def _clean_path(raw: Any, setting: str) -> str:
 def _distinct(values: Sequence[str], setting: str, problems: _Problems) -> tuple[str, ...]:
     """Record each value that a list holds twice: a list has one form, with each value once.
 
+    Under ``legacy_forms`` a repeat is no error, because the older reader
+    dropped each repeat and kept the first value.
+
     Args:
         values: The checked values, in file order.
         setting: The setting of the list, named in errors.
@@ -930,7 +943,7 @@ def _distinct(values: Sequence[str], setting: str, problems: _Problems) -> tuple
         Each value once, in file order, so a duplicate hides no other mistake.
     """
     unique = tuple(dict.fromkeys(values))
-    if len(unique) < len(values):
+    if len(unique) < len(values) and not _LEGACY_FORMS.get():
         for value in dict.fromkeys(value for value in values if values.count(value) > 1):
             problems.add(
                 f"{CONSTRAINTS_FILE}: {setting} holds '{value}' more than once. List each value"
@@ -1032,20 +1045,29 @@ def _shown(value: str) -> str:
 def _shell_command(value: Any, setting: str) -> str:
     """Read one shell command, such as ``[setup] command``.
 
+    Under ``legacy_forms`` the command is stripped and may hold line breaks,
+    tabs and other control characters, as the older reader allowed, so a
+    multi-line command keeps its lines. The length limit applies to the
+    value before the strip, as in the older reader.
+
     Args:
         value: The value as parsed.
         setting: The setting's name, used in errors.
 
     Returns:
-        The command.
+        The command; stripped under ``legacy_forms``.
 
     Raises:
         ConstraintsError: When the value is not text of 1 to the command limit
-            of characters, has a space at the start or the end, or holds a
-            control character.
+            of characters, or, unless under ``legacy_forms``, has a space at the
+            start or the end or holds a control character.
     """
+    legacy = _LEGACY_FORMS.get()
+    # The older reader checked the length before the strip, so a too-long value still fails.
+    if legacy and isinstance(value, str) and len(value) <= _MAX_COMMAND_CHARS:
+        value = value.strip()
     command = _text(value, setting, _MAX_COMMAND_CHARS)
-    if _CONTROL_CHARS.search(command):
+    if not legacy and _CONTROL_CHARS.search(command):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {setting} must be one command without control characters, such"
             ' as "pip install -r requirements.txt".',
@@ -1115,7 +1137,9 @@ def _names(
 
     Returns:
         The valid names, each once, in file order; empty when the key is absent
-        or the value is not a bounded list.
+        or the value is not a bounded list. Under ``legacy_forms`` each name is
+        stripped first, as the older reader did. The length limit applies to
+        the name before the strip, as in the older reader.
     """
     values = section.get(key, [])
     setting = f"{label} {key}"
@@ -1125,6 +1149,11 @@ def _names(
             **_at(setting),
         )
         return ()
+    if _LEGACY_FORMS.get():
+        values = [
+            value.strip() if isinstance(value, str) and len(value) <= _MAX_NAME_CHARS else value
+            for value in values
+        ]
     names = [problems.check(_text, value, setting, _MAX_NAME_CHARS) for value in values]
     return _distinct([name for name in names if name is not None], setting, problems)
 
@@ -1132,15 +1161,22 @@ def _names(
 def _network_host(host: Any, label: str) -> str:
     """Check one entry of a ``network`` list.
 
+    Under ``legacy_forms`` the host is put in lower case after the host-name
+    check, as the older reader did. The public-host check stays under
+    ``legacy_forms``, unlike the older reader: the list comes from the
+    repository, so localhost or a private IP address would let a run reach
+    internal hosts.
+
     Args:
         host: The entry as parsed.
         label: The table as the file names it, used in errors.
 
     Returns:
-        The host as written.
+        The host as written; in lower case under ``legacy_forms``.
 
     Raises:
-        ConstraintsError: When the entry is not a public host name in lower case.
+        ConstraintsError: When the entry is not a host name, is not a public
+            host, or, unless under ``legacy_forms``, is not in lower case.
     """
     setting = f"{label} network"
     if not isinstance(host, str) or len(host) > 253 or not _HOST.fullmatch(host):
@@ -1150,12 +1186,18 @@ def _network_host(host: Any, label: str) -> str:
             **_at(setting),
         )
     # The same rules as a service url, so an allowlist cannot open a path to internal hosts.
+    # This holds under legacy_forms too, though the older reader had no such check (SSRF).
     if not _public_host(host.lower().removeprefix("*.").partition(":")[0]):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} network entry {host!r} must name a public host such"
             " as api.example.com, not an IP address or localhost.",
             **_at(setting),
         )
+    # The lower case comes after both checks: the host-name check sees the raw value, so a
+    # non-ASCII letter that lowers to ASCII (the Kelvin sign) fails, as in the older reader,
+    # and the public-host error quotes the entry as the file writes it.
+    if _LEGACY_FORMS.get():
+        return host.lower()
     if host != host.lower():
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} network entry '{host}' must be in lower case. Write"
@@ -1302,7 +1344,9 @@ def _entry(value: Any, label: str) -> str | tuple[str, ...]:
         ``"path.py:function"`` with a cleaned path, or the command as a tuple.
 
     Raises:
-        ConstraintsError: When the value is neither form.
+        ConstraintsError: When the value is neither form. A command part may
+            hold a control character only under ``legacy_forms``, as the older
+            reader allowed.
     """
     problem = ConstraintsError(
         f'{CONSTRAINTS_FILE}: {label} entry must be "path/to/file.py:function" for a Python'
@@ -1333,7 +1377,7 @@ def _entry(value: Any, label: str) -> str | tuple[str, ...]:
             isinstance(part, str)
             and part.strip()
             and len(part) <= _MAX_COMMAND_CHARS
-            and not _CONTROL_CHARS.search(part)
+            and (_LEGACY_FORMS.get() or not _CONTROL_CHARS.search(part))
             for part in value
         )
     ):
@@ -2319,7 +2363,11 @@ def _toml_error(error: tomllib.TOMLDecodeError) -> ConstraintsError:
 
 
 def parse_constraints(
-    raw: bytes, *, require_version: bool = True, limits: RunnerLimits = RunnerLimits()
+    raw: bytes,
+    *,
+    require_version: bool = True,
+    limits: RunnerLimits = RunnerLimits(),
+    legacy_forms: bool = False,
 ) -> RepoConstraints:
     """Validate the bytes of a constraints file.
 
@@ -2335,6 +2383,22 @@ def parse_constraints(
             reads it as version 1, for a run that started before the key
             was required (SKY-690); a wrong ``version`` fails either way.
         limits: The runner's limits, such as the most vCPUs of a box.
+        legacy_forms: Only for re-reading the contract of a run that started
+            under an older, lenient reader (SKY-760). ``True`` accepts each
+            form that reader accepted, and gives the values that reader gave:
+            a ``[setup] command`` or ``[metric] setup`` is stripped and may
+            hold any control character, such as a line break or a tab; a path
+            with spaces around it, a ``\\`` between folders or a ``/`` at the
+            end is cleaned; each name of a ``services`` list is stripped; a
+            ``network`` host is put in lower case; a command ``entry`` of
+            ``[run]``, ``[metric]`` or a target may hold a control character
+            (``[proposer]`` still refuses one);
+            and a value that a list holds twice is dropped with no error, and
+            the first stays. One difference from that reader is on purpose: a
+            ``network`` entry must still be a public host, because the list
+            comes from the repository and localhost or a private IP address
+            would let a run reach internal hosts. All other rules stay the
+            same. New checks keep the default, ``False``.
 
     Returns:
         The validated proposal.
@@ -2343,6 +2407,31 @@ def parse_constraints(
         ConstraintsError: When the file is too large, not TOML, or holds an
             unknown, malformed, or unsupported setting. ``errors`` holds
             every error, each with its line.
+    """
+    token = _LEGACY_FORMS.set(legacy_forms)
+    try:
+        return _parse_constraints(raw, require_version=require_version, limits=limits)
+    finally:
+        _LEGACY_FORMS.reset(token)
+
+
+def _parse_constraints(
+    raw: bytes, *, require_version: bool, limits: RunnerLimits
+) -> RepoConstraints:
+    """Validate the bytes of a constraints file, as :func:`parse_constraints` describes.
+
+    The caller sets ``_LEGACY_FORMS``.
+
+    Args:
+        raw: The file's contents.
+        require_version: As for :func:`parse_constraints`.
+        limits: As for :func:`parse_constraints`.
+
+    Returns:
+        The validated proposal.
+
+    Raises:
+        ConstraintsError: As for :func:`parse_constraints`.
     """
     if len(raw) > _MAX_FILE_BYTES:
         raise ConstraintsError(f"{CONSTRAINTS_FILE} is larger than {_MAX_FILE_BYTES // 1024} KiB.")
@@ -2645,6 +2734,7 @@ def read_constraints(
     require_version: bool = True,
     limits: RunnerLimits = RunnerLimits(),
     compose_parser: Callable[[str], tuple[Any, ...]] | None = None,
+    legacy_forms: bool = False,
 ) -> RepoConstraints | None:
     """Read the constraints file at the root of a packed snapshot.
 
@@ -2663,6 +2753,11 @@ def read_constraints(
         compose_parser: The runner's reader of the ``[sandbox] compose`` file's
             text. It returns the services and raises ``ValueError`` with the
             reason when the box cannot run the file.
+        legacy_forms: Only for re-reading the contract of a run that started
+            under an older, lenient reader (SKY-760). It accepts the old forms
+            that :func:`parse_constraints` lists, and also lets an MCP server
+            ``type`` of a named ``.mcp.json`` file match in any case. New
+            checks keep the default, ``False``.
 
     Returns:
         The validated proposal, or ``None`` when the repository has no such file.
@@ -2679,10 +2774,42 @@ def read_constraints(
             ``setup`` argument names a symbolic link, a path inside one, or a
             folder that holds one.
     """
+    token = _LEGACY_FORMS.set(legacy_forms)
+    try:
+        return _read_constraints(
+            archive, require_version=require_version, limits=limits, compose_parser=compose_parser
+        )
+    finally:
+        _LEGACY_FORMS.reset(token)
+
+
+def _read_constraints(
+    archive: Path,
+    *,
+    require_version: bool,
+    limits: RunnerLimits,
+    compose_parser: Callable[[str], tuple[Any, ...]] | None,
+) -> RepoConstraints | None:
+    """Read the constraints file at the root of a packed snapshot, as for :func:`read_constraints`.
+
+    The caller sets ``_LEGACY_FORMS``.
+
+    Args:
+        archive: The repository tree as a gzip tar archive.
+        require_version: Passed to :func:`_parse_constraints`.
+        limits: Passed to :func:`_parse_constraints`.
+        compose_parser: As for :func:`read_constraints`.
+
+    Returns:
+        The validated proposal, or ``None`` when the repository has no such file.
+
+    Raises:
+        ConstraintsError: As for :func:`read_constraints`.
+    """
     raw = read_constraints_file(archive)
     if raw is None:
         return None
-    constraints = parse_constraints(raw, require_version=require_version, limits=limits)
+    constraints = _parse_constraints(raw, require_version=require_version, limits=limits)
     # Each loader fills its own fields, so one that fails leaves the others valid input.
     problems = _Problems()
     constraints = _load_mcp_files(constraints, archive, problems)
@@ -3239,9 +3366,14 @@ def _mcp_server(name: str, entry: Any, prefix: str) -> McpServer:
     if not isinstance(entry, dict):
         problems.add(f"{prefix}: {label} must be an object.")
         problems.raise_any()
-    # The type is matched exactly, so "STDIO" and "HTTP" both get the type error.
+    # The type is matched exactly, so "HTTP" gets the type error; under legacy_forms
+    # it matches in any case, as in the older reader. A type such as
+    # "STDIO" still fails, but with the stdio advice, which says what to change.
     kind = entry.get("type", "http")
-    if kind == "stdio" or _MCP_STDIO_KEYS & set(entry):
+    folded = kind.lower() if isinstance(kind, str) else None
+    if _LEGACY_FORMS.get() and folded is not None:
+        kind = folded
+    if folded == "stdio" or _MCP_STDIO_KEYS & set(entry):
         problems.add(
             f"{prefix}: {label} is a stdio server (command, args, env). Only http servers are"
             ' supported now; give it a "url" and put each secret in "headers" as ${NAME}.'

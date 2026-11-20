@@ -229,6 +229,18 @@ The module `openascent.contract` reads and checks `ascent.toml`. It uses only th
 - One error lists at most 500 diagnostics. When there are more, one last diagnostic counts the ones that are not shown, and `error.hidden` holds that number. The count line of `ascent check` gives the full number of errors.
 - A valid file has its warnings in `contract.warnings`. No check gives a warning yet.
 - The parser does not convert a value. A value in another form fails, and the error gives the one valid form. For example, `"src/"` must be `"src"`, a host must be in lower case, and a list holds each value once.
+- `legacy_forms=True` (a keyword of `parse_constraints` and `read_constraints`) is only for a runner that reads again the contract of a run that started under an older, lenient reader. It accepts each form that the older reader accepted, and gives the same values as that reader:
+  - It strips `[setup] command` and `[metric] setup`, and lets them hold any control character, such as a line break or a tab.
+  - It cleans a path: spaces around it, `\` between folders, a `/` at the end.
+  - It strips each name of a `services` list.
+  - It puts a `network` host in lower case.
+  - It lets a command `entry` of `[run]`, `[metric]` or a target hold a control character. `[proposer] entry` and `[proposer] setup` still refuse one.
+  - It drops a value that a list holds twice, with no error, and keeps the first.
+  - `read_constraints` also matches an MCP server `type` in any case, in the `.mcp.json` files that it reads.
+
+  One difference from the older reader is on purpose. A `network` entry must still be a public host, so localhost and private IP addresses fail. The list comes from the repository, and an internal host in it would let a run reach the runner's network. The older reader had no such check.
+
+  All other rules stay the same. New checks keep the default, `False`.
 
 The runner gives its own limits as a `RunnerLimits`: the most vCPUs of a box (default 32) and the longest `timeout` of `[run]` and of a stage (default: no maximum).
 The defaults are the limits of the Skynet runner.
@@ -538,7 +550,7 @@ The package does not validate records. It has no dependency for that. Use a JSON
 Install from PyPI, with a pinned version:
 
 ```sh
-pip install openascent==0.4.1
+pip install openascent==0.4.2
 ```
 
 Or install from the repository, at a release tag:
