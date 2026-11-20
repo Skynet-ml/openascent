@@ -1185,10 +1185,6 @@ def _network_host(host: Any, label: str) -> str:
             " such as api.example.com, not a URL. Use network = [] for no network.",
             **_at(setting),
         )
-    # The host check runs first, so a non-ASCII letter that lowers to ASCII, such as
-    # the Kelvin sign, still fails, as in the older reader.
-    if _LEGACY_FORMS.get():
-        host = host.lower()
     # The same rules as a service url, so an allowlist cannot open a path to internal hosts.
     # This holds under legacy_forms too, though the older reader had no such check (SSRF).
     if not _public_host(host.lower().removeprefix("*.").partition(":")[0]):
@@ -1197,6 +1193,11 @@ def _network_host(host: Any, label: str) -> str:
             " as api.example.com, not an IP address or localhost.",
             **_at(setting),
         )
+    # The lower case comes after both checks: the host-name check sees the raw value, so a
+    # non-ASCII letter that lowers to ASCII (the Kelvin sign) fails, as in the older reader,
+    # and the public-host error quotes the entry as the file writes it.
+    if _LEGACY_FORMS.get():
+        return host.lower()
     if host != host.lower():
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} network entry '{host}' must be in lower case. Write"
@@ -2370,7 +2371,11 @@ def parse_constraints(
 ) -> RepoConstraints:
     """Validate the bytes of a constraints file.
 
-    See :func:`_parse_constraints` for the checks.
+    Unknown sections and keys fail rather than being ignored, so a rule the
+    runtime cannot enforce is never silently dropped. One check finds every
+    error: only a file that is too large or not TOML stops it early. A
+    setting with an error gets its unset value, and a rule that reads it is
+    not checked, so one mistake gives one error.
 
     Args:
         raw: The file's contents.
@@ -2413,28 +2418,20 @@ def parse_constraints(
 def _parse_constraints(
     raw: bytes, *, require_version: bool, limits: RunnerLimits
 ) -> RepoConstraints:
-    """Validate the bytes of a constraints file.
+    """Validate the bytes of a constraints file, as :func:`parse_constraints` describes.
 
-    Unknown sections and keys fail rather than being ignored, so a rule the
-    runtime cannot enforce is never silently dropped. One check finds every
-    error: only a file that is too large or not TOML stops it early. A
-    setting with an error gets its unset value, and a rule that reads it is
-    not checked, so one mistake gives one error.
+    The caller sets ``_LEGACY_FORMS``.
 
     Args:
         raw: The file's contents.
-        require_version: Whether a file with no ``version`` fails. ``False``
-            reads it as version 1, for a run that started before the key
-            was required (SKY-690); a wrong ``version`` fails either way.
-        limits: The runner's limits, such as the most vCPUs of a box.
+        require_version: As for :func:`parse_constraints`.
+        limits: As for :func:`parse_constraints`.
 
     Returns:
         The validated proposal.
 
     Raises:
-        ConstraintsError: When the file is too large, not TOML, or holds an
-            unknown, malformed, or unsupported setting. ``errors`` holds
-            every error, each with its line.
+        ConstraintsError: As for :func:`parse_constraints`.
     """
     if len(raw) > _MAX_FILE_BYTES:
         raise ConstraintsError(f"{CONSTRAINTS_FILE} is larger than {_MAX_FILE_BYTES // 1024} KiB.")
@@ -2741,25 +2738,41 @@ def read_constraints(
 ) -> RepoConstraints | None:
     """Read the constraints file at the root of a packed snapshot.
 
-    See :func:`_read_constraints` for the checks.
+    The named files are checked only when ``ascent.toml`` itself has no error.
+    When it has one, the raised error lists only the mistakes of ``ascent.toml``,
+    because a path with an error names no file to check.
+
+    The package does not know the Compose format, which belongs to the runner.
+    With no ``compose_parser``, the ``[sandbox] compose`` file is not read and
+    ``compose_services`` stays empty.
 
     Args:
         archive: The repository tree as a gzip tar archive.
         require_version: Passed to :func:`parse_constraints`.
         limits: Passed to :func:`parse_constraints`.
         compose_parser: The runner's reader of the ``[sandbox] compose`` file's
-            text, as for :func:`_read_constraints`.
+            text. It returns the services and raises ``ValueError`` with the
+            reason when the box cannot run the file.
         legacy_forms: Only for re-reading the contract of a run that started
-            under an older, lenient reader (SKY-760). Passed to
-            :func:`parse_constraints`, and also lets an MCP server ``type`` of
-            a named ``.mcp.json`` file match in any case. New checks keep the
-            default, ``False``.
+            under an older, lenient reader (SKY-760). It accepts the old forms
+            that :func:`parse_constraints` lists, and also lets an MCP server
+            ``type`` of a named ``.mcp.json`` file match in any case. New
+            checks keep the default, ``False``.
 
     Returns:
         The validated proposal, or ``None`` when the repository has no such file.
 
     Raises:
-        ConstraintsError: As for :func:`_read_constraints`.
+        ConstraintsError: When the file is not a regular file or is invalid, when
+            a named MCP file is missing or not a valid ``mcpServers`` file, when
+            one secret goes to two hosts, when a named instructions or rule
+            file is missing, not a regular text file, too large, empty, or not
+            a list of top-level bullets, or when the ``[data] cases`` file is
+            missing, too large, empty, or has a line that is not one case,
+            or, with a ``compose_parser``, when the ``[sandbox] compose`` file
+            is missing or the parser refuses it, or when a ``[proposer] entry`` or
+            ``setup`` argument names a symbolic link, a path inside one, or a
+            folder that holds one.
     """
     token = _LEGACY_FORMS.set(legacy_forms)
     try:
@@ -2777,38 +2790,21 @@ def _read_constraints(
     limits: RunnerLimits,
     compose_parser: Callable[[str], tuple[Any, ...]] | None,
 ) -> RepoConstraints | None:
-    """Read the constraints file at the root of a packed snapshot.
+    """Read the constraints file at the root of a packed snapshot, as for :func:`read_constraints`.
 
-    The named files are checked only when ``ascent.toml`` itself has no error.
-    When it has one, the raised error lists only the mistakes of ``ascent.toml``,
-    because a path with an error names no file to check.
-
-    The package does not know the Compose format, which belongs to the runner.
-    With no ``compose_parser``, the ``[sandbox] compose`` file is not read and
-    ``compose_services`` stays empty.
+    The caller sets ``_LEGACY_FORMS``.
 
     Args:
         archive: The repository tree as a gzip tar archive.
-        require_version: Passed to :func:`parse_constraints`.
-        limits: Passed to :func:`parse_constraints`.
-        compose_parser: The runner's reader of the ``[sandbox] compose`` file's
-            text. It returns the services and raises ``ValueError`` with the
-            reason when the box cannot run the file.
+        require_version: Passed to :func:`_parse_constraints`.
+        limits: Passed to :func:`_parse_constraints`.
+        compose_parser: As for :func:`read_constraints`.
 
     Returns:
         The validated proposal, or ``None`` when the repository has no such file.
 
     Raises:
-        ConstraintsError: When the file is not a regular file or is invalid, when
-            a named MCP file is missing or not a valid ``mcpServers`` file, when
-            one secret goes to two hosts, when a named instructions or rule
-            file is missing, not a regular text file, too large, empty, or not
-            a list of top-level bullets, or when the ``[data] cases`` file is
-            missing, too large, empty, or has a line that is not one case,
-            or, with a ``compose_parser``, when the ``[sandbox] compose`` file
-            is missing or the parser refuses it, or when a ``[proposer] entry`` or
-            ``setup`` argument names a symbolic link, a path inside one, or a
-            folder that holds one.
+        ConstraintsError: As for :func:`read_constraints`.
     """
     raw = read_constraints_file(archive)
     if raw is None:

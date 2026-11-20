@@ -4627,6 +4627,31 @@ _LEGACY = {
 }
 
 
+# The start of the one error that the default gives for each old form, after "ascent.toml: ".
+_LEGACY_ERRORS = {
+    "editable-repeat": "[paths] editable holds 'src' more than once",
+    "editable-repeat-slash": "'src/' in [paths] editable must be written 'src'",
+    "metric-entry-control": '[metric] entry must be "path/to/file.py:function"',
+    "metric-files-repeat": "'m.py/' in [metric] files must be written 'm.py'",
+    "metric-files-trailing-slash": "'scoring/' in [metric] files must be written 'scoring'",
+    "metric-setup": "[metric] setup must not start or end",
+    "metric-setup-lines": "[metric] setup must not start or end",
+    "network-repeat": "[run] network entry 'API.example.com' must be in lower case",
+    "path-backslash": "'src\\a' in [paths] editable must be written 'src/a'",
+    "path-spaces": "' src ' in [paths] editable must be written 'src'",
+    "path-trailing-slash": "'src/' in [paths] editable must be written 'src'",
+    "protected-repeat-backslash": "'a\\b' in [paths] protected must be written 'a/b'",
+    "protected-trailing-slash": "'eval/' in [paths] protected must be written 'eval'",
+    "services-repeat": "[run] services holds 'svc' more than once",
+    "services-spaces": "[run] services must not start or end",
+    "setup-line-break": "[setup] command must not start or end",
+    "setup-lines": "[setup] command must not start or end",
+    "setup-spaces": "[setup] command must not start or end",
+    "setup-tab": "[setup] command must be one command without control characters",
+    "upper-host": "[run] network entry 'API.Example.com' must be in lower case",
+}
+
+
 def _field(constraints: RepoConstraints, name: str) -> object:
     """Return a field of the proposal named by a dotted path, such as ``metric.setup``."""
     value: object = constraints
@@ -4649,10 +4674,11 @@ def test_the_default_still_refuses_each_old_form(form: str) -> None:
     """Without legacy_forms, each old form still fails, as before."""
     raw = _VALID_RUN + _LEGACY[form][0]
 
-    with pytest.raises(ConstraintsError):
-        parse_constraints(raw)
-    with pytest.raises(ConstraintsError):
-        parse_constraints(raw, legacy_forms=False)
+    for kwargs in ({}, {"legacy_forms": False}):
+        with pytest.raises(ConstraintsError) as error:
+            parse_constraints(raw, **kwargs)
+        assert len(error.value.errors) == 1
+        assert error.value.errors[0].message.startswith(f"ascent.toml: {_LEGACY_ERRORS[form]}")
 
 
 def test_legacy_forms_keep_every_other_rule() -> None:
@@ -4735,6 +4761,20 @@ def test_legacy_forms_still_refuse_a_network_host_that_is_not_public(host: str) 
     for legacy_forms in (False, True):
         with pytest.raises(ConstraintsError, match="must name a public host"):
             parse_constraints(raw, legacy_forms=legacy_forms)
+
+
+@pytest.mark.parametrize("legacy_forms", [False, True])
+def test_a_network_host_that_is_not_public_is_named_as_written(legacy_forms: bool) -> None:
+    """The public-host error quotes the entry as the file writes it, also under legacy_forms."""
+    raw = _VALID_RUN + b'network = ["LOCALHOST"]\n'
+
+    with pytest.raises(ConstraintsError) as error:
+        parse_constraints(raw, legacy_forms=legacy_forms)
+
+    assert [d.message for d in error.value.errors] == [
+        "ascent.toml: [run] network entry 'LOCALHOST' must name a public host such as"
+        " api.example.com, not an IP address or localhost."
+    ]
 
 
 @pytest.mark.parametrize(
