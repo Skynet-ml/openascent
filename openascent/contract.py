@@ -293,7 +293,12 @@ def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
     headers: dict[str, int] = {}
     keys: dict[tuple[str | None, str], int] = {}
     section: str | None = None
+    # A value that goes on past its line: open brackets, and an open multi-line string.
+    depth, open_string = 0, None
     for number, line in enumerate(text.splitlines(), start=1):
+        if depth or open_string:
+            depth, open_string = _value_state(line, 0, depth, open_string)
+            continue
         header = _HEADER_LINE.fullmatch(line) or _ARRAY_LINE.fullmatch(line)
         if header is not None and header.group(1).strip():
             section = ".".join(part.strip().strip("\"'") for part in header.group(1).split("."))
@@ -301,9 +306,11 @@ def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
             continue
         key = _KEY_LINE.match(line)
         if key is not None:
-            keys.setdefault(
-                (section, next(group for group in key.groups() if group is not None)), number
-            )
+            name = key.group(2) if key.group(2) is not None else key.group(3)
+            if key.group(1) is not None:
+                name = _basic_key(key.group(1))
+            keys.setdefault((section, name), number)
+            depth, open_string = _value_state(line, key.end(), 0, None)
 
     def line_of(section: str | None, key: str | None) -> int | None:
         """Return the line of the key, else of the nearest header or dotted key that holds it."""
@@ -326,6 +333,69 @@ def _with_lines(errors: Sequence[Diagnostic], text: str) -> list[Diagnostic]:
         return None
 
     return [replace(error, line=line_of(error.section, error.key)) for error in errors]
+
+
+def _basic_key(raw: str) -> str:
+    """Decode the escapes of a quoted key, such as ``"a\\u202eb"``, as TOML does.
+
+    Args:
+        raw: The text between the double quotes.
+
+    Returns:
+        The key, or ``raw`` when it is not a valid quoted key.
+    """
+    if "\\" not in raw:
+        return raw
+    try:
+        return next(iter(tomllib.loads(f'"{raw}" = 0')))
+    except tomllib.TOMLDecodeError:
+        return raw
+
+
+def _value_state(
+    line: str, start: int, depth: int, open_string: str | None
+) -> tuple[int, str | None]:
+    """Follow a value from ``start`` to the end of the line, one character at a time.
+
+    Args:
+        line: One line of the file.
+        start: Where the value starts, or 0 for a line inside a value.
+        depth: The brackets and braces still open before the line.
+        open_string: The three quotes that opened a multi-line string still
+            open before the line, or ``None``.
+
+    Returns:
+        The open brackets and the open multi-line string at the end of the line.
+    """
+    index = start
+    while index < len(line):
+        char = line[index]
+        if open_string is not None:
+            if char == "\\" and open_string == '"""':
+                index += 2
+                continue
+            if line.startswith(open_string, index):
+                index += 3
+                open_string = None
+                continue
+            index += 1
+            continue
+        if char == "#":
+            break
+        if line.startswith(('"""', "'''"), index):
+            open_string = line[index : index + 3]
+            index += 3
+            continue
+        if char in "\"'":
+            index += 1
+            while index < len(line) and line[index] != char:
+                index += 2 if char == '"' and line[index] == "\\" else 1
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth = max(depth - 1, 0)
+        index += 1
+    return depth, open_string
 
 
 def _did_you_mean(name: str, valid: Iterable[str]) -> str:
@@ -1206,8 +1276,8 @@ def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...
 
 
 def _target(
-    section: Any, name: str, declared: Collection[str], limits: RunnerLimits
-) -> TargetStage:
+    section: Any, name: str, declared: Collection[str], limits: RunnerLimits, problems: _Problems
+) -> RoleEnvironment | None:
     """Read one ``[target.<name>]`` stage.
 
     Args:
@@ -1215,22 +1285,23 @@ def _target(
         name: The stage's name.
         declared: The name of each ``[services.<name>]`` table of the file.
         limits: The runner's limits.
+        problems: Records every error of the stage: it is not a named table,
+            or a setting is missing, unknown or malformed.
 
     Returns:
-        The validated stage.
-
-    Raises:
-        ConstraintsError: With every error of the stage: it is not a named
-            table, or a setting is missing, unknown or malformed.
+        The validated :class:`TargetStage`. When the stage has an error, a
+        :class:`RoleEnvironment` with only its valid role settings, so the
+        rules across sections still check them. ``None`` when it is not a table.
     """
     if not isinstance(section, dict):
-        raise ConstraintsError(
+        problems.add(
             f"{CONSTRAINTS_FILE}: [target] {name} needs a stage name: use [target.<name>] for each"
             ' stage, for example [target.planner] with entry = "agents/planner.py:plan".',
             section="target",
             key=name,
         )
-    problems = _Problems()
+        return None
+    errors = len(problems.errors)
     if not _TABLE_NAME.fullmatch(name):
         problems.add(
             f"{CONSTRAINTS_FILE}: the [target] stage name {name[:100]!r} must start with a letter"
@@ -1267,9 +1338,9 @@ def _target(
     role = _role(section, label, declared, problems)
     entry = problems.check(_entry, section["entry"], label) if "entry" in section else None
     timeout = problems.check(_timeout, section, label, "openascent.call", limits)
-    problems.raise_any()
-    # An absent or invalid entry recorded an error, so raise_any raised.
-    assert entry is not None
+    # An absent or invalid entry records an error, so a stage with no entry is never returned.
+    if len(problems.errors) > errors or entry is None:
+        return RoleEnvironment(**role)
     return TargetStage(**role, entry=entry, vcpus=vcpus, timeout=timeout)
 
 
@@ -1442,7 +1513,7 @@ def _outcome(section: Mapping[str, Any]) -> tuple[float | None, dict[str, float]
     return target, limits
 
 
-def _service(section: Any, name: str) -> ServiceSpec:
+def _service(section: Any, name: str, problems: _Problems) -> ServiceSpec | None:
     """Read one ``[services.<name>]`` declaration.
 
     The file is public with the repository, so it may name secrets but must
@@ -1453,24 +1524,24 @@ def _service(section: Any, name: str) -> ServiceSpec:
     Args:
         section: The value under the service's name.
         name: The service's name.
+        problems: Records every error of the declaration: it is not a table,
+            has no url, has an unknown key or the removed ``secrets`` key, a
+            header holds a raw secret value, or a query value is not one
+            ``${NAME}``.
 
     Returns:
-        The validated declaration.
-
-    Raises:
-        ConstraintsError: With every error of the declaration: it is not a
-            table, has no url, has an unknown key or the removed ``secrets``
-            key, a header holds a raw secret value, or a query value is not
-            one ``${NAME}``.
+        The declaration. When it has an error, it holds only its valid parts,
+        so the rules across sections still check them, and ``url`` is
+        ``None`` when the url has an error. ``None`` when it is not a table.
     """
     if not isinstance(section, dict):
-        raise ConstraintsError(
+        problems.add(
             f"{CONSTRAINTS_FILE}: [services] {name[:100]} must be a [services.<name>] table with a"
             " url and headers. A repository file cannot grant services with a value.",
             section="services",
             key=name,
         )
-    problems = _Problems()
+        return None
     if not _TABLE_NAME.fullmatch(name):
         problems.add(
             f"{CONSTRAINTS_FILE}: the service name {name[:100]!r} must start with a letter or digit"
@@ -1502,24 +1573,49 @@ def _service(section: Any, name: str) -> ServiceSpec:
             section=f"services.{name}",
             key="url",
         )
-    headers = (
-        problems.check(_service_headers, section["headers"], label)
-        if "headers" in section
-        else None
-    )
-    query = (
-        problems.check(_service_query, section["query"], label, default={})
-        if "query" in section
-        else {}
-    )
+    headers = None
+    if "headers" in section:
+        headers = problems.check(_service_headers, section["headers"], label)
+        if headers is None:
+            headers = _valid_items(_service_headers, section["headers"], label) or None
+    query = {}
+    if "query" in section:
+        query = problems.check(_service_query, section["query"], label)
+        if query is None:
+            query = _valid_items(_service_query, section["query"], label)
     url = problems.check(_service_url, section["url"], label) if "url" in section else None
-    problems.raise_any()
     return ServiceSpec(
         secrets=_placeholders(*(headers or {}).values(), *query.values()),
         url=url,
         headers=headers,
         query=query,
     )
+
+
+def _valid_items(
+    read: Callable[[Any, str], dict[str, str]], value: Any, label: str
+) -> dict[str, str]:
+    """Return the items of a table that pass ``read`` one by one, without new errors.
+
+    The caller already recorded the errors of the whole table.
+
+    Args:
+        read: The reader of the whole table, such as :func:`_service_headers`.
+        value: The table as parsed.
+        label: The table as the file names it.
+
+    Returns:
+        The valid items, in file order.
+    """
+    if not isinstance(value, dict) or len(value) > _MAX_NAMES:
+        return {}
+    kept: dict[str, str] = {}
+    for item in value.items():
+        try:
+            kept |= read(dict([item]), label)
+        except ConstraintsError:
+            continue
+    return kept
 
 
 def _public_host(host: str) -> bool:
@@ -2252,16 +2348,19 @@ def parse_constraints(
         )
     # Every declared name counts, so a role that names a service with an error gets no second one.
     declared = (*document.get("services", {}), *misspelled_services)
+    # A stage or service with an error keeps its valid parts, so the rules
+    # across sections still check them and a second mistake is not hidden.
     services = {
         name: spec
         for name, table in problems.check(_named_tables, document, "services", default={}).items()
-        if (spec := problems.check(_service, table, name)) is not None
+        if (spec := _service(table, name, problems)) is not None
     }
-    targets = {
+    stages = {
         name: stage
         for name, table in problems.check(_named_tables, document, "target", default={}).items()
-        if (stage := problems.check(_target, table, name, declared, limits)) is not None
+        if (stage := _target(table, name, declared, limits, problems)) is not None
     }
+    targets = {name: stage for name, stage in stages.items() if isinstance(stage, TargetStage)}
     proposer_section = document.get("proposer", {})
     proposer = _role(proposer_section, "[proposer]", declared, problems)
     proposer_entry = problems.check(_command, proposer_section, "entry", "[proposer]")
@@ -2280,7 +2379,12 @@ def parse_constraints(
     run_role = _role(run_section, "[run]", declared, problems)
     metric_section = document.get("metric", {})
     metric_role = _role(metric_section, "[metric]", declared, problems)
-    problems.check(_check_secret_receivers, services, {})
+    # A url with an error is None, and an unknown host is no second host for a secret.
+    problems.check(
+        _check_secret_receivers,
+        {name: spec for name, spec in services.items() if spec.url is not None},
+        {},
+    )
     instructions_file = (
         None if instructions is None else problems.check(_one_file, instructions, "instructions")
     )
@@ -2304,7 +2408,7 @@ def parse_constraints(
         )
     ]
     rule_files += [
-        (f"[target.{name}] illegal", stage.illegal_file) for name, stage in targets.items()
+        (f"[target.{name}] illegal", stage.illegal_file) for name, stage in stages.items()
     ]
     problems.check(_refuse_visible_cases, cases_file, rule_files)
     metric = _metric(metric_section, problems)
@@ -2315,7 +2419,7 @@ def parse_constraints(
         if setting != "[metric] illegal" and (cases_file is None or path != cases_file)
     ]
     visible += [("[proposer] mcp", proposer["mcp"]), ("[run] mcp", run_role["mcp"])]
-    visible += [(f"[target.{name}] mcp", stage.mcp) for name, stage in targets.items()]
+    visible += [(f"[target.{name}] mcp", stage.mcp) for name, stage in stages.items()]
     visible_paths = {path for _, path in visible}
     metric_only = [
         path

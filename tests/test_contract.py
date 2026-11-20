@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 
 from openascent.contract import (
+    _ARRAY_LINE,
+    _HEADER_LINE,
     CONSTRAINTS_FILE,
     ERROR,
     ConstraintsError,
@@ -3923,6 +3925,9 @@ def test_a_long_hostile_header_line_is_scanned_in_linear_time() -> None:
     start = time.monotonic()
     with pytest.raises(ConstraintsError) as caught:
         parse_constraints(raw.encode())
+    # The scan skips a multi-line string, so the header patterns are timed on the line too.
+    assert _HEADER_LINE.fullmatch(hostile) is None
+    assert _ARRAY_LINE.fullmatch("[" + hostile) is None
 
     assert time.monotonic() - start < 1
     assert {(e.line, e.key) for e in caught.value.errors} == {(4, "vcpus"), (5, "note")}
@@ -4058,3 +4063,57 @@ def test_the_write_hint_quotes_a_value_with_single_quotes() -> None:
     assert _errors(raw)[0][3].endswith("Write 'echo 'hi''.")
     raw = _VALID_RUN + b'network = ["API.example.com"]\n'
     assert _errors(raw)[0][3].endswith("Write 'api.example.com'.")
+
+
+def test_a_stage_with_an_error_still_gets_the_hidden_file_rule() -> None:
+    """A bad vcpus does not hide that the stage's illegal file is inside the hidden metric files."""
+    raw = (
+        b'version = 1\n[target.p]\nentry = "p.py:plan"\nvcpus = 3\nillegal = "m/rules.md"\n'
+        b'[metric]\nfiles = ["m"]\n'
+    )
+    assert [(line, key) for line, _, key, _ in _errors(raw)] == [(4, "vcpus"), (5, "illegal")]
+    assert "inside the hidden scoring files" in _errors(raw)[1][3]
+
+
+def test_a_service_with_an_error_still_gets_the_one_host_rule() -> None:
+    """A bad header name does not hide that a valid header sends a secret to a second host."""
+    raw = _VALID_RUN + (
+        b'[services.a]\nurl = "https://a.example.com"\n'
+        b'headers = { "bad name" = "x", X-Key = "${K}" }\n'
+        b'[services.b]\nurl = "https://b.example.com"\nheaders = { X-Key = "${K}" }\n'
+    )
+    assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [
+        (6, "services.a", "headers"),
+        (7, "services.b", None),
+    ]
+    assert _errors(raw)[1][3].startswith("ascent.toml: ${K} goes to a.example.com and")
+
+
+def test_a_service_with_a_bad_url_gives_no_second_host_error() -> None:
+    """A service whose url has an error is not a second host for its secret."""
+    raw = _VALID_RUN + (
+        b'[services.a]\nurl = "ftp://a.example.com"\nheaders = { X-Key = "${K}" }\n'
+        b'[services.b]\nurl = "https://b.example.com"\nheaders = { X-Key = "${K}" }\n'
+    )
+    assert [(section, key) for _, section, key, _ in _errors(raw)] == [("services.a", "url")]
+
+
+def test_a_line_inside_a_multi_line_value_is_not_a_header_or_a_key() -> None:
+    """Lines inside a multi-line array or string do not move the line of a later key."""
+    raw = (
+        b'version = 1\n[run]\nentry = [\n["x"]\n]\nnote = """\ntimeout = 1\n[metric]\n"""\n'
+        b"timeout = -1\n"
+    )
+    assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [
+        (6, "run", "note"),
+        (3, "run", "entry"),
+        (10, "run", "timeout"),
+    ]
+
+
+def test_a_quoted_key_with_an_escape_gets_its_own_line() -> None:
+    """A quoted key such as "a\\u202eb" is decoded before the scan looks up its line."""
+    raw = _VALID_RUN + b'"a\\u202eb" = 1\n'
+    assert [(line, section, key) for line, section, key, _ in _errors(raw)] == [
+        (4, "run", "a\u202eb")
+    ]
