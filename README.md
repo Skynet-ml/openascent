@@ -188,7 +188,7 @@ RUN pip install openascent==<version>
 
 `ascent check --image` ships in 0.2.0, so pin 0.2.0 or a later release.
 
-The image needs Python 3.12 or later.
+The image needs Python 3.11 or later. On Python 3.11, pin 0.4.1 or a later release. Earlier releases need Python 3.12 or later.
 
 ## A short metric
 
@@ -538,7 +538,7 @@ The package does not validate records. It has no dependency for that. Use a JSON
 Install from PyPI, with a pinned version:
 
 ```sh
-pip install openascent==0.4.0
+pip install openascent==0.4.1
 ```
 
 Or install from the repository, at a release tag:
@@ -547,7 +547,7 @@ Or install from the repository, at a release tag:
 pip install git+https://github.com/Skynet-ml/openascent@<tag>
 ```
 
-The package needs Python 3.12 or later and has no runtime dependency.
+The package needs Python 3.11 or later and has no runtime dependency. Releases before 0.4.1 need Python 3.12 or later.
 
 ## Supported platforms
 
