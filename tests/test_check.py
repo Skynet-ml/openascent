@@ -2,13 +2,23 @@
 
 import json
 import tomllib
+import types
 from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator
 
+from openascent import cli
 from openascent.cli import main
-from openascent.contract import _SECTIONS, _TARGET_KEYS, parse_constraints
+from openascent.contract import (
+    _SECTIONS,
+    _TARGET_KEYS,
+    ERROR,
+    WARNING,
+    ConstraintsError,
+    Diagnostic,
+    parse_constraints,
+)
 from openascent.schema import contract_schema, schema_text
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -176,28 +186,26 @@ def test_a_rule_across_sections_passes_the_schema_but_not_ascent_check(tmp_path,
     raw = b'version = 1\n[metric]\nentry = "metric.py:score"\n'
     assert list(_validator().iter_errors(tomllib.loads(raw.decode()))) == []
 
-    assert main(["check", _write(tmp_path, raw)]) == 1
-    report = json.loads(capsys.readouterr().out)
-    assert report["ok"] is False
-    assert report["error"].startswith("ascent.toml: [metric] has nothing to judge.")
-    assert (report["section"], report["key"]) == ("metric", None)
+    path = _write(tmp_path, raw)
+    assert main(["check", path]) == 1
+    first, count = capsys.readouterr().out.splitlines()
+    assert first.startswith(f"{path}:2: [metric]: error: [metric] has nothing to judge.")
+    assert count == "1 error, 0 warnings"
 
 
 def test_check_accepts_a_valid_file(tmp_path, capsys):
-    """A valid file prints ``ok`` and exits 0.
+    """A valid file prints only the count line and exits 0.
 
     Args:
         tmp_path: Scratch folder.
         capsys: Captures the report.
     """
-    path = _write(tmp_path, FULL)
-
-    assert main(["check", path]) == 0
-    assert json.loads(capsys.readouterr().out) == {"ok": True, "file": path}
+    assert main(["check", _write(tmp_path, FULL)]) == 0
+    assert capsys.readouterr().out == "0 errors, 0 warnings\n"
 
 
-def test_check_reports_the_error_with_its_section_and_key(tmp_path, capsys):
-    """An invalid file prints the parser's error, section and key, and exits 1.
+def test_check_reports_the_error_with_its_line_section_and_key(tmp_path, capsys):
+    """An invalid file prints the place, level and message of the error, and exits 1.
 
     Args:
         tmp_path: Scratch folder.
@@ -206,17 +214,82 @@ def test_check_reports_the_error_with_its_section_and_key(tmp_path, capsys):
     path = _write(tmp_path, b'version = 1\n[run]\nentry = "run.py:main"\nvcpus = 3\n')
 
     assert main(["check", path]) == 1
-    assert json.loads(capsys.readouterr().out) == {
-        "ok": False,
-        "file": path,
-        "error": "ascent.toml: [run] vcpus must be 1 or an even number from 2 to 32.",
-        "section": "run",
-        "key": "vcpus",
-    }
+    assert capsys.readouterr().out == (
+        f"{path}:4: [run] vcpus: error: [run] vcpus must be 1 or an even number from 2 to 32.\n"
+        "1 error, 0 warnings\n"
+    )
+
+
+def test_check_reports_every_mistake_and_counts_them(tmp_path, capsys):
+    """A file with three mistakes in three sections prints three errors, then the count.
+
+    Args:
+        tmp_path: Scratch folder.
+        capsys: Captures the report.
+    """
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\nvcpus = 3\n'
+        b'[paths]\neditable = ["src/"]\n[metrc]\n'
+    )
+    path = _write(tmp_path, raw)
+
+    assert main(["check", path]) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        f"{path}:7: [metrc]: error: [metrc] is not a supported section. Did you mean 'metric'?",
+        f"{path}:6: [paths] editable: error: 'src/' in [paths] editable must be written 'src':"
+        " '/' between folders, and no space or '/' at the start or the end.",
+        f"{path}:4: [run] vcpus: error: [run] vcpus must be 1 or an even number from 2 to 32.",
+        "3 errors, 0 warnings",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("levels", "count", "code"),
+    [
+        ([WARNING], "0 errors, 1 warning", 0),
+        ([WARNING, WARNING], "0 errors, 2 warnings", 0),
+        ([ERROR, WARNING], "1 error, 1 warning", 1),
+        ([ERROR, ERROR, WARNING, WARNING], "2 errors, 2 warnings", 1),
+    ],
+)
+def test_check_counts_each_level_and_fails_only_on_an_error(
+    tmp_path, capsys, monkeypatch, levels, count, code
+):
+    """The count line uses the singular for one, and only an error makes the exit code 1.
+
+    No check gives a warning yet, so the parser is replaced with one that gives these levels.
+
+    Args:
+        tmp_path: Scratch folder.
+        capsys: Captures the report.
+        monkeypatch: Replaces the parser.
+        levels: The level of each diagnostic.
+        count: The expected count line.
+        code: The expected exit code.
+    """
+    found = [
+        Diagnostic(level=level, message=f"ascent.toml: problem {n}.")
+        for n, level in enumerate(levels)
+    ]
+    errors = [d for d in found if d.level == ERROR]
+
+    def parse(raw):
+        """Return the warnings, or raise the errors with the warnings, as the parser does."""
+        if errors:
+            raise ConstraintsError(errors[0].message, errors=found)
+        return types.SimpleNamespace(warnings=tuple(found))
+
+    monkeypatch.setattr(cli, "parse_constraints", parse)
+    path = _write(tmp_path, FULL)
+
+    assert main(["check", path]) == code
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[:-1] == [f"{path}: {d.level}: problem {n}." for n, d in enumerate(found)]
+    assert lines[-1] == count
 
 
 def test_check_reports_a_timeout_too_large_for_a_float(tmp_path, capsys):
-    """A timeout integer with hundreds of digits prints the JSON report, not a traceback.
+    """A timeout integer with hundreds of digits prints the report, not a traceback.
 
     Args:
         tmp_path: Scratch folder.
@@ -226,30 +299,28 @@ def test_check_reports_a_timeout_too_large_for_a_float(tmp_path, capsys):
     path = _write(tmp_path, raw)
 
     assert main(["check", path]) == 1
-    assert json.loads(capsys.readouterr().out) == {
-        "ok": False,
-        "file": path,
-        "error": "ascent.toml: [run] timeout must be a positive number of seconds for each case.",
-        "section": "run",
-        "key": "timeout",
-    }
+    assert capsys.readouterr().out == (
+        f"{path}:4: [run] timeout: error: [run] timeout must be a positive number of seconds"
+        " for each case.\n1 error, 0 warnings\n"
+    )
 
 
-def test_check_reports_an_error_with_no_section_as_null(tmp_path, capsys):
-    """A file that is not TOML has no section and no key.
+def test_check_reports_an_error_with_no_section_without_a_place(tmp_path, capsys):
+    """A file that is not TOML has no line, section or key, so the line names only the file.
 
     Args:
         tmp_path: Scratch folder.
         capsys: Captures the report.
     """
-    assert main(["check", _write(tmp_path, b"version = \n")]) == 1
-    report = json.loads(capsys.readouterr().out)
-    assert report["error"].startswith("ascent.toml is not valid TOML:")
-    assert (report["section"], report["key"]) == (None, None)
+    path = _write(tmp_path, b"version = \n")
+    assert main(["check", path]) == 1
+    first, count = capsys.readouterr().out.splitlines()
+    assert first.startswith(f"{path}: error: ascent.toml is not valid TOML:")
+    assert count == "1 error, 0 warnings"
 
 
 def test_check_reports_a_file_nested_too_deeply(tmp_path, capsys):
-    """Deeply nested arrays print the JSON report and exit 1, not a RecursionError traceback.
+    """Deeply nested arrays print the report and exit 1, not a RecursionError traceback.
 
     Args:
         tmp_path: Scratch folder.
@@ -259,10 +330,9 @@ def test_check_reports_a_file_nested_too_deeply(tmp_path, capsys):
     path = _write(tmp_path, raw)
 
     assert main(["check", path]) == 1
-    report = json.loads(capsys.readouterr().out)
-    assert report["ok"] is False
-    assert report["error"].startswith("ascent.toml is not valid TOML:")
-    assert (report["file"], report["section"], report["key"]) == (path, None, None)
+    first, count = capsys.readouterr().out.splitlines()
+    assert first.startswith(f"{path}: error: ascent.toml is not valid TOML:")
+    assert count == "1 error, 0 warnings"
 
 
 @pytest.mark.parametrize(
