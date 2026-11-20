@@ -248,6 +248,23 @@ def test_check_reports_an_error_with_no_section_as_null(tmp_path, capsys):
     assert (report["section"], report["key"]) == (None, None)
 
 
+def test_check_reports_a_file_nested_too_deeply(tmp_path, capsys):
+    """Deeply nested arrays print the JSON report and exit 1, not a RecursionError traceback.
+
+    Args:
+        tmp_path: Scratch folder.
+        capsys: Captures the report.
+    """
+    raw = b"version = 1\nx = " + b"[" * 20000 + b"]" * 20000 + b"\n"
+    path = _write(tmp_path, raw)
+
+    assert main(["check", path]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["ok"] is False
+    assert report["error"].startswith("ascent.toml is not valid TOML:")
+    assert (report["file"], report["section"], report["key"]) == (path, None, None)
+
+
 @pytest.mark.parametrize(
     "argv",
     [

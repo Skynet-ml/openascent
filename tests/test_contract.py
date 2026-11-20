@@ -18,6 +18,7 @@ from openascent.contract import (
     MetricSpec,
     RepoConstraints,
     RoleEnvironment,
+    RunnerLimits,
     ServiceSpec,
     TargetStage,
     _inside,
@@ -1259,6 +1260,130 @@ def test_a_target_stage_gets_the_default_vcpus_and_timeout() -> None:
     ]
 
     assert (stage.vcpus, stage.timeout, stage.network) == (2, 60.0, None)
+
+
+def test_a_toml_file_nested_too_deeply_fails_as_not_valid_toml() -> None:
+    """Deep array nesting under the size limit fails as invalid TOML, not with RecursionError."""
+    raw = b"version = 1\nx = " + b"[" * 20000 + b"]" * 20000 + b"\n"
+
+    with pytest.raises(ConstraintsError, match=r"^ascent\.toml is not valid TOML: ") as caught:
+        parse_constraints(raw)
+    assert (caught.value.section, caught.value.key) == (None, None)
+
+
+_V1_RUN = b"version = 1\n" + _RUN
+_STAGE = 'version = 1\n[target.solver]\nentry = "solver.py:solve"\n'
+
+
+def test_a_runner_with_more_vcpus_accepts_its_maximum_and_refuses_more() -> None:
+    """A runner's own max_vcpus sets the largest box, in [run] and in a target stage."""
+    limits = RunnerLimits(max_vcpus=64)
+
+    run = parse_constraints(_V1_RUN + b"vcpus = 64\n", limits=limits)
+    stage = parse_constraints(f"{_STAGE}vcpus = 64\n".encode(), limits=limits)
+    assert run.run_vcpus == 64
+    assert stage.targets["solver"].vcpus == 64
+    with pytest.raises(ConstraintsError) as caught:
+        parse_constraints(f"{_STAGE}vcpus = 66\n".encode(), limits=limits)
+    assert str(caught.value) == (
+        "ascent.toml: [target.solver] vcpus must be 1 or an even number from 2 to 64."
+    )
+    assert (caught.value.section, caught.value.key) == ("target.solver", "vcpus")
+
+
+def test_a_runner_max_timeout_accepts_the_limit_and_refuses_more() -> None:
+    """A runner's max_timeout bounds the [run] timeout and each target stage timeout."""
+    limits = RunnerLimits(max_timeout=120)
+
+    assert parse_constraints(_V1_RUN + b"timeout = 120\n", limits=limits).run_timeout == 120.0
+    stage = parse_constraints(f"{_STAGE}timeout = 120\n".encode(), limits=limits)
+    assert stage.targets["solver"].timeout == 120.0
+    with pytest.raises(ConstraintsError) as caught:
+        parse_constraints(_V1_RUN + b"timeout = 120.5\n", limits=limits)
+    assert str(caught.value) == (
+        "ascent.toml: [run] timeout must be at most 120 seconds for each case."
+    )
+    assert (caught.value.section, caught.value.key) == ("run", "timeout")
+    with pytest.raises(ConstraintsError) as caught:
+        parse_constraints(f"{_STAGE}timeout = 121\n".encode(), limits=limits)
+    assert str(caught.value) == (
+        "ascent.toml: [target.solver] timeout must be at most 120 seconds for each openascent.call."
+    )
+    assert (caught.value.section, caught.value.key) == ("target.solver", "timeout")
+
+
+def test_the_default_limits_set_no_maximum_timeout() -> None:
+    """With no runner limits, a long timeout parses."""
+    assert parse_constraints(_V1_RUN + b"timeout = 86400\n").run_timeout == 86400.0
+
+
+_COMPOSE = b'version = 1\n[sandbox]\ncompose = "compose.yaml"\n' + _RUN
+_COMPOSE_TEXT = b"services:\n  db:\n    image: postgres\n"
+
+
+def test_without_a_compose_parser_the_compose_file_is_not_read(tmp_path: Path) -> None:
+    """With no compose_parser, a missing compose file is not refused and no service is filled."""
+    constraints = read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: _COMPOSE}))
+
+    assert constraints is not None
+    assert (constraints.compose_file, constraints.compose_services) == ("compose.yaml", ())
+
+
+def test_a_compose_parser_fills_the_compose_services(tmp_path: Path) -> None:
+    """The parser gets the compose file's text, and its services are kept."""
+    seen: list[str] = []
+
+    def parse(text: str) -> tuple[str, ...]:
+        """Record the text and return one service.
+
+        Args:
+            text: The compose file's text.
+
+        Returns:
+            One service name.
+        """
+        seen.append(text)
+        return ("db",)
+
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: _COMPOSE, "compose.yaml": _COMPOSE_TEXT})
+    constraints = read_constraints(archive, compose_parser=parse)
+
+    assert constraints is not None
+    assert constraints.compose_services == ("db",)
+    assert seen == [_COMPOSE_TEXT.decode()]
+
+
+def test_a_compose_parser_value_error_becomes_a_constraints_error(tmp_path: Path) -> None:
+    """A ValueError from the parser fails the file at [sandbox] compose, with its reason."""
+
+    def refuse(text: str) -> tuple[str, ...]:
+        """Refuse every compose file.
+
+        Args:
+            text: The compose file's text.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("the box cannot run privileged services")
+
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: _COMPOSE, "compose.yaml": _COMPOSE_TEXT})
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(archive, compose_parser=refuse)
+    assert str(caught.value) == (
+        "ascent.toml: [sandbox] compose names 'compose.yaml': the box cannot run privileged"
+        " services"
+    )
+    assert (caught.value.section, caught.value.key) == ("sandbox", "compose")
+
+
+def test_a_missing_compose_file_is_refused_when_a_parser_is_given(tmp_path: Path) -> None:
+    """With a compose_parser, the compose file must be in the snapshot."""
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: _COMPOSE})
+
+    with pytest.raises(ConstraintsError, match=r"\[sandbox\] compose") as caught:
+        read_constraints(archive, compose_parser=lambda text: ("db",))
+    assert caught.value.section == "sandbox"
 
 
 @pytest.mark.parametrize("vcpus", [1, 2, 8, 32])

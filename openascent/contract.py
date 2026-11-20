@@ -1713,6 +1713,12 @@ def parse_constraints(
         document = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise ConstraintsError(f"{CONSTRAINTS_FILE} is not valid TOML: {error}") from error
+    except RecursionError as error:
+        # tomllib recurses once for each nested array, so deep nesting under the size limit
+        # overflows the stack; Skynet's own parser crashes on this input.
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE} is not valid TOML: arrays or tables are nested too deeply."
+        ) from error
     if "version" not in document and require_version:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: version is missing. Put version = 1 at the top of the file,"
