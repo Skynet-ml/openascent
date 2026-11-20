@@ -4614,11 +4614,6 @@ _LEGACY = {
         "run_role.network",
         ("api.example.com",),
     ),
-    "network-local": (
-        b'network = ["localhost", "10.0.0.1:8080"]\n',
-        "run_role.network",
-        ("localhost", "10.0.0.1:8080"),
-    ),
     "services-repeat": (
         b'services = ["svc", "svc"]\n[services.svc]\nurl = "https://svc.example.com"\n',
         "run_role.services",
@@ -4727,6 +4722,61 @@ def test_legacy_forms_clean_the_paths_of_the_named_files(tmp_path: Path) -> None
     with pytest.raises(ConstraintsError) as error:
         read_constraints(archive, compose_parser=lambda text: ("db",))
     assert len(error.value.errors) == 5
+
+
+@pytest.mark.parametrize("host", ["localhost", "10.0.0.1:8080", "127.0.0.1", "LOCALHOST"])
+def test_legacy_forms_still_refuse_a_network_host_that_is_not_public(host: str) -> None:
+    """The one difference from the older reader: a non-public network host fails in both modes.
+
+    The network list comes from the repository, so an internal host would let a run reach it.
+    """
+    raw = _VALID_RUN + b'network = ["' + host.encode() + b'"]\n'
+
+    for legacy_forms in (False, True):
+        with pytest.raises(ConstraintsError, match="must name a public host"):
+            parse_constraints(raw, legacy_forms=legacy_forms)
+
+
+@pytest.mark.parametrize(
+    ("setting", "message"),
+    [
+        (
+            b'[setup]\ncommand = "' + b"x" * 300 + b'   "\n',
+            "[setup] command must be text of 1 to 300 characters.",
+        ),
+        (
+            b'[metric]\nsetup = "' + b"x" * 300 + b'   "\n',
+            "[metric] setup must be text of 1 to 300 characters.",
+        ),
+        (
+            b'services = ["' + b"s" * 100 + b' "]\n',
+            "[run] services must be text of 1 to 100 characters.",
+        ),
+    ],
+)
+def test_legacy_forms_check_the_length_before_the_strip(setting: bytes, message: str) -> None:
+    """With legacy_forms, the limit applies to the raw value, as in the older reader."""
+    with pytest.raises(ConstraintsError) as error:
+        parse_constraints(_VALID_RUN + setting, legacy_forms=True)
+
+    assert [d.message for d in error.value.errors] == [f"ascent.toml: {message}"]
+
+
+def test_legacy_forms_check_the_host_before_the_lower_case() -> None:
+    """A non-ASCII letter that lowers to ASCII, such as the Kelvin sign, still fails."""
+    raw = _VALID_RUN + 'network = ["\u212aexample.com"]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match="must be a host name"):
+        parse_constraints(raw, legacy_forms=True)
+
+
+def test_legacy_forms_end_with_a_call_that_fails() -> None:
+    """A legacy call that raises leaves the next default call strict."""
+    with pytest.raises(ConstraintsError):
+        parse_constraints(_VALID_RUN + b'[paths]\neditable = ["/abs"]\n', legacy_forms=True)
+
+    with pytest.raises(ConstraintsError, match="must be written 'src'"):
+        parse_constraints(_VALID_RUN + b'[paths]\neditable = ["src/"]\n')
 
 
 def test_legacy_forms_end_with_the_call() -> None:

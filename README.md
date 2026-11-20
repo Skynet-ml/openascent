@@ -233,10 +233,12 @@ The module `openascent.contract` reads and checks `ascent.toml`. It uses only th
   - It strips `[setup] command` and `[metric] setup`, and lets them hold line breaks and tabs.
   - It cleans a path: spaces around it, `\` between folders, a `/` at the end.
   - It strips each name of a `services` list.
-  - It puts a `network` host in lower case, and accepts localhost or an IP address. The older reader had no public-host check.
+  - It puts a `network` host in lower case.
   - It lets a part of a command `entry` hold a control character.
   - It drops a value that a list holds twice, with no error, and keeps the first.
-  - It matches an MCP server `type` in any case.
+  - `read_constraints` also matches an MCP server `type` in any case, in the `.mcp.json` files that it reads.
+
+  One difference from the older reader is on purpose. A `network` entry must still be a public host, so localhost and private IP addresses fail. The list comes from the repository, and an internal host in it would let a run reach the runner's network. The older reader had no such check.
 
   All other rules stay the same. New checks keep the default, `False`.
 

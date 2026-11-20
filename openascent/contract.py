@@ -879,12 +879,15 @@ def _clean_path(raw: Any, setting: str) -> str:
         setting: The setting it came from, such as ``[paths] editable``, named in errors.
 
     Returns:
-        The path as written; ``.`` for the whole tree.
+        The path as written; ``.`` for the whole tree. Under ``legacy_forms``,
+        the cleaned path: stripped, ``\\`` changed to ``/``, and no ``/`` at
+        the start or the end, as the older reader gave it.
 
     Raises:
         ConstraintsError: When the value is not a path inside the repository, is
-            a pattern, or is not written in its one form: ``/`` between folders,
-            and no space or ``/`` at the start or the end.
+            a pattern, or, unless under ``legacy_forms``, is not written in its
+            one form: ``/`` between folders, and no space or ``/`` at the start
+            or the end.
     """
     if not isinstance(raw, str):
         raise ConstraintsError(
@@ -1044,7 +1047,8 @@ def _shell_command(value: Any, setting: str) -> str:
 
     Under ``legacy_forms`` the command is stripped and may hold line breaks,
     tabs and other control characters, as the older reader allowed, so a
-    multi-line command keeps its lines.
+    multi-line command keeps its lines. The length limit applies to the
+    value before the strip, as in the older reader.
 
     Args:
         value: The value as parsed.
@@ -1059,7 +1063,8 @@ def _shell_command(value: Any, setting: str) -> str:
             start or the end or holds a control character.
     """
     legacy = _LEGACY_FORMS.get()
-    if legacy and isinstance(value, str):
+    # The older reader checked the length before the strip, so a too-long value still fails.
+    if legacy and isinstance(value, str) and len(value) <= _MAX_COMMAND_CHARS:
         value = value.strip()
     command = _text(value, setting, _MAX_COMMAND_CHARS)
     if not legacy and _CONTROL_CHARS.search(command):
@@ -1133,7 +1138,8 @@ def _names(
     Returns:
         The valid names, each once, in file order; empty when the key is absent
         or the value is not a bounded list. Under ``legacy_forms`` each name is
-        stripped first, as the older reader did.
+        stripped first, as the older reader did. The length limit applies to
+        the name before the strip, as in the older reader.
     """
     values = section.get(key, [])
     setting = f"{label} {key}"
@@ -1144,7 +1150,10 @@ def _names(
         )
         return ()
     if _LEGACY_FORMS.get():
-        values = [value.strip() if isinstance(value, str) else value for value in values]
+        values = [
+            value.strip() if isinstance(value, str) and len(value) <= _MAX_NAME_CHARS else value
+            for value in values
+        ]
     names = [problems.check(_text, value, setting, _MAX_NAME_CHARS) for value in values]
     return _distinct([name for name in names if name is not None], setting, problems)
 
@@ -1152,8 +1161,11 @@ def _names(
 def _network_host(host: Any, label: str) -> str:
     """Check one entry of a ``network`` list.
 
-    Under ``legacy_forms`` the host is put in lower case, and localhost or an
-    IP address is accepted, because the older reader had no public-host check.
+    Under ``legacy_forms`` the host is put in lower case after the host-name
+    check, as the older reader did. The public-host check stays under
+    ``legacy_forms``, unlike the older reader: the list comes from the
+    repository, so localhost or a private IP address would let a run reach
+    internal hosts.
 
     Args:
         host: The entry as parsed.
@@ -1163,23 +1175,23 @@ def _network_host(host: Any, label: str) -> str:
         The host as written; in lower case under ``legacy_forms``.
 
     Raises:
-        ConstraintsError: When the entry is not a host name, or, unless under
-            ``legacy_forms``, not a public host name in lower case.
+        ConstraintsError: When the entry is not a host name, is not a public
+            host, or, unless under ``legacy_forms``, is not in lower case.
     """
     setting = f"{label} network"
-    if _LEGACY_FORMS.get() and isinstance(host, str):
-        host = host.lower()
     if not isinstance(host, str) or len(host) > 253 or not _HOST.fullmatch(host):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} network entry {str(host)[:100]!r} must be a host name"
             " such as api.example.com, not a URL. Use network = [] for no network.",
             **_at(setting),
         )
+    # The host check runs first, so a non-ASCII letter that lowers to ASCII, such as
+    # the Kelvin sign, still fails, as in the older reader.
+    if _LEGACY_FORMS.get():
+        host = host.lower()
     # The same rules as a service url, so an allowlist cannot open a path to internal hosts.
-    # A run that started under the older reader keeps the hosts that reader allowed.
-    if not _LEGACY_FORMS.get() and not _public_host(
-        host.lower().removeprefix("*.").partition(":")[0]
-    ):
+    # This holds under legacy_forms too, though the older reader had no such check (SSRF).
+    if not _public_host(host.lower().removeprefix("*.").partition(":")[0]):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} network entry {host!r} must name a public host such"
             " as api.example.com, not an IP address or localhost.",
@@ -2373,11 +2385,13 @@ def parse_constraints(
             hold line breaks and tabs; a path with spaces around it, a ``\\``
             between folders or a ``/`` at the end is cleaned; each name of a
             ``services`` list is stripped; a ``network`` host is put in lower
-            case, and localhost or an IP address is accepted; a part of a
-            command ``entry`` may hold a control character; a value that a
-            list holds twice is dropped with no error, and the first stays;
-            and an MCP server ``type`` matches in any case. All other rules
-            stay the same. New checks keep the default, ``False``.
+            case; a part of a command ``entry`` may hold a control character;
+            and a value that a list holds twice is dropped with no error, and
+            the first stays. One difference from that reader is on purpose: a
+            ``network`` entry must still be a public host, because the list
+            comes from the repository and localhost or a private IP address
+            would let a run reach internal hosts. All other rules stay the
+            same. New checks keep the default, ``False``.
 
     Returns:
         The validated proposal.
@@ -3354,7 +3368,8 @@ def _mcp_server(name: str, entry: Any, prefix: str) -> McpServer:
     if not isinstance(entry, dict):
         problems.add(f"{prefix}: {label} must be an object.")
         problems.raise_any()
-    # The type is matched exactly, so "HTTP" gets the type error. A type such as
+    # The type is matched exactly, so "HTTP" gets the type error; under legacy_forms
+    # it matches in any case, as in the older reader. A type such as
     # "STDIO" still fails, but with the stdio advice, which says what to change.
     kind = entry.get("type", "http")
     if _LEGACY_FORMS.get() and isinstance(kind, str):
