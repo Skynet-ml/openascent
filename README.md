@@ -538,7 +538,7 @@ The package does not validate records. It has no dependency for that. Use a JSON
 Install from PyPI, with a pinned version:
 
 ```sh
-pip install openascent==0.3.0
+pip install openascent==0.4.0
 ```
 
 Or install from the repository, at a release tag:
