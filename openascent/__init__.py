@@ -2,7 +2,7 @@
 
 A component reads the JSON file that ``ASCENT_INPUT`` names, writes the JSON
 file that ``ASCENT_OUTPUT`` names, and exits 0. This package implements the
-runner side of that rule.
+runner side of that rule, and reads the ``ascent.toml`` contract.
 """
 
 from .component import (
@@ -13,6 +13,14 @@ from .component import (
     call_metric,
     call_run,
     parse_entry,
+)
+from .contract import (
+    CONSTRAINTS_FILE,
+    ConstraintsError,
+    RepoConstraints,
+    RunnerLimits,
+    parse_constraints,
+    read_constraints,
 )
 from .helpers import HelperError, StageError, call, llm, log
 from .result import (
@@ -30,12 +38,15 @@ from .result import (
     check_run_output,
     load_json,
 )
+from .schema import contract_schema
 
 __version__ = "0.2.1"
 
 __all__ = [
+    "CONSTRAINTS_FILE",
     "MAX_OUTPUT_BYTES",
     "AscentError",
+    "ConstraintsError",
     "ExitCodeError",
     "FunctionEntry",
     "HelperError",
@@ -46,7 +57,9 @@ __all__ = [
     "NamedScore",
     "NoOutputError",
     "OutputFileError",
+    "RepoConstraints",
     "RunCall",
+    "RunnerLimits",
     "StageError",
     "StartError",
     "TimeLimitError",
@@ -56,8 +69,11 @@ __all__ = [
     "call_run",
     "check_metric_result",
     "check_run_output",
+    "contract_schema",
     "llm",
     "load_json",
     "log",
+    "parse_constraints",
     "parse_entry",
+    "read_constraints",
 ]

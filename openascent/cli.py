@@ -3,8 +3,14 @@
 ``ascent score --entry <entry> --input <file> [--timeout <seconds>]`` runs one
 metric call in the current directory and prints the checked answer as JSON.
 
+``ascent check <file>`` checks an ``ascent.toml`` contract and prints the
+report as JSON: ``ok``, and for an invalid file the error with its section and
+key. It checks the file alone; the runner checks the files that it names.
+
 ``ascent check --image --role <candidate|metric>`` checks that the current box
 can run components of that role and prints the report as JSON.
+
+``ascent schema`` prints the JSON Schema of ``ascent.toml``.
 """
 
 import argparse
@@ -15,8 +21,10 @@ import sys
 from pathlib import Path
 
 from .component import FunctionEntry, call_metric, parse_entry
+from .contract import ConstraintsError, parse_constraints
 from .image_check import ROLES, check_image
 from .result import AscentError
+from .schema import schema_text
 
 DEFAULT_TIMEOUT_S = 60.0
 
@@ -49,18 +57,29 @@ def main(argv: list[str] | None = None) -> int:
         help=f"The time limit in seconds (default {DEFAULT_TIMEOUT_S:g}).",
     )
     check = commands.add_parser(
-        "check", help="Check that the current box image speaks the protocol."
+        "check", help="Check an ascent.toml file, or with --image the current box."
     )
-    # SKY-759 adds a file argument to this command. With --image, check takes no file.
+    check.add_argument("file", nargs="?", help="The ascent.toml file to check.")
     check.add_argument("--image", action="store_true", help="Check the current box, not a file.")
     check.add_argument("--role", choices=ROLES, help="The role of the box (with --image).")
+    commands.add_parser("schema", help="Print the JSON Schema of ascent.toml.")
     args = parser.parse_args(argv)
+    if args.command == "schema":
+        sys.stdout.write(schema_text())
+        return 0
     if args.command == "check":
-        if not args.image:
-            check.error("give --image; check takes no other form yet")
-        if args.role is None:
-            check.error("--image needs --role candidate or --role metric")
-        report = check_image(args.role)
+        if args.image:
+            if args.file is not None:
+                check.error("--image checks the current box and takes no file")
+            if args.role is None:
+                check.error("--image needs --role candidate or --role metric")
+            report = check_image(args.role)
+        elif args.file is None:
+            check.error("give an ascent.toml file, or --image --role <role>")
+        elif args.role is not None:
+            check.error("--role needs --image")
+        else:
+            report = _check_file(check, args.file)
         print(json.dumps(report))
         return 0 if report["ok"] else 1
     try:
@@ -83,6 +102,34 @@ def main(argv: list[str] | None = None) -> int:
     sys.stderr.write(call.stderr)
     print(json.dumps(call.result.to_dict()))
     return 0
+
+
+def _check_file(check: argparse.ArgumentParser, path: str) -> dict[str, object]:
+    """Check one ``ascent.toml`` file with the full parser.
+
+    Args:
+        check: The ``check`` parser, which reports an unreadable file.
+        path: The path of the file.
+
+    Returns:
+        The report: ``ok``, the file and, when the file is invalid, the error
+        with its section and key (``null`` when the error has none).
+    """
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as error:
+        check.error(f"cannot read {path}: {error}")
+    try:
+        parse_constraints(raw)
+    except ConstraintsError as error:
+        return {
+            "ok": False,
+            "file": path,
+            "error": str(error),
+            "section": error.section,
+            "key": error.key,
+        }
+    return {"ok": True, "file": path}
 
 
 def _timeout(text: str) -> float:
