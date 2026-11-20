@@ -295,6 +295,7 @@ def _call(
                 value = check(load_json(_read_output(dir_fd, max_output_bytes)))
             except AscentError as error:
                 error.stderr = stderr
+                error.stdout = stdout
                 raise
         finally:
             os.close(dir_fd)

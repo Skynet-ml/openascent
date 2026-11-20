@@ -31,7 +31,7 @@ from .result import (
     load_json,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "MAX_OUTPUT_BYTES",

@@ -83,11 +83,13 @@ Each error type has a stable `code`:
 | --- | --- |
 | `start_failed` | The command cannot start: it is not found or not executable, the function file does not exist, or the working directory or the environment is not valid. A relative function path with a current directory that no longer exists also gives this code. |
 | `time_limit` | The command ran longer than the time limit. The runner kills its whole process group. A process that leaves the group (for example with `setsid`) is not stopped; that needs an OS sandbox. |
-| `nonzero_exit` | The command exited with a code that is not 0. The error keeps the code and the tail of stderr. |
+| `nonzero_exit` | The command exited with a code that is not 0. The error keeps the code, the tail of stderr and the tail of stdout. |
 | `no_output` | The command wrote no output file. |
 | `bad_output_file` | The output path is a symbolic link or a hard link, or not a regular file, the runner cannot open the file, or the file is larger than the size limit (1 MiB by default). The runner reads the output through the call directory that it made, so a command that swaps that directory cannot redirect the read. |
 | `invalid_json` | The output file is not strict JSON: not UTF-8, a `NaN` or `Infinity` token, a float literal that overflows (`1e400`), an integer longer than the digit limit of the Python interpreter (4300 digits by default), a duplicate key, or a lone surrogate escape such as `"\ud800"`. |
 | `invalid_form` | The output file is valid JSON but not the valid form, for example a metric result with no `score`, or a `score` that is an integer too large for a float. A large integer in a run output is valid. |
+
+Every error after the command runs keeps the tails of stdout and stderr in `error.stdout` and `error.stderr`. A `start_failed` error has empty tails.
 
 ## The two entry forms
 
@@ -467,7 +469,7 @@ The package does not validate records. It has no dependency for that. Use a JSON
 Install from PyPI, with a pinned version:
 
 ```sh
-pip install openascent==0.2.0
+pip install openascent==0.2.1
 ```
 
 Or install from the repository, at a release tag:
