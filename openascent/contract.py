@@ -928,12 +928,25 @@ def _target(
             section=f"target.{name}",
             key="entry",
         )
+    # The default box is 2 vCPUs; a 1-vCPU runner gets 1, which is still a valid size.
+    vcpus = (
+        _vcpus(section["vcpus"], label, f"target.{name}", limits)
+        if "vcpus" in section
+        else min(_DEFAULT_VCPUS, limits.max_vcpus)
+    )
     return TargetStage(
         **_role(section, label, services),
         entry=_entry(section["entry"], label),
-        vcpus=_vcpus(section.get("vcpus", _DEFAULT_VCPUS), label, f"target.{name}", limits),
+        vcpus=vcpus,
         timeout=_timeout(section, label, "openascent.call", limits),
     )
+
+
+def _default_timeout(limits: RunnerLimits) -> float:
+    """Return the 60-second default timeout, cut to the runner's maximum."""
+    if limits.max_timeout is None:
+        return _DEFAULT_TIMEOUT_SECONDS
+    return min(_DEFAULT_TIMEOUT_SECONDS, float(limits.max_timeout))
 
 
 def _timeout(section: Mapping[str, Any], label: str, unit: str, limits: RunnerLimits) -> float:
@@ -946,13 +959,15 @@ def _timeout(section: Mapping[str, Any], label: str, unit: str, limits: RunnerLi
         limits: The runner's limits.
 
     Returns:
-        The timeout, or the 60-second default when the key is absent.
+        The timeout, or the default when the key is absent.
 
     Raises:
         ConstraintsError: When the value is not a positive finite number, or is
             more than the runner's maximum.
     """
-    timeout = section.get("timeout", _DEFAULT_TIMEOUT_SECONDS)
+    if "timeout" not in section:
+        return _default_timeout(limits)
+    timeout = section["timeout"]
     # bool is an int in Python, so ``timeout = true`` would otherwise read as 1.
     number = (
         timeout if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else math.nan
@@ -994,7 +1009,7 @@ def _run(
         ConstraintsError: When ``[run]`` has no entry, or the entry or timeout is malformed.
     """
     if section is None:
-        return None, _DEFAULT_TIMEOUT_SECONDS
+        return None, _default_timeout(limits)
     if "entry" not in section:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: [run] entry is missing. Name the function"

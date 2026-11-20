@@ -1313,6 +1313,35 @@ def test_a_runner_max_timeout_accepts_the_limit_and_refuses_more() -> None:
     assert (caught.value.section, caught.value.key) == ("target.solver", "timeout")
 
 
+def test_an_unset_timeout_takes_the_default_cut_to_the_runner_maximum() -> None:
+    """An unset [run] or stage timeout, or no [run], uses min(60, max_timeout) and parses."""
+    limits = RunnerLimits(max_timeout=30)
+
+    assert parse_constraints(_V1_RUN, limits=limits).run_timeout == 30.0
+    no_run = parse_constraints(_STAGE.encode(), limits=limits)
+    assert (no_run.targets["solver"].timeout, no_run.run_timeout) == (30.0, 30.0)
+    assert parse_constraints(_V1_RUN, limits=RunnerLimits(max_timeout=90)).run_timeout == 60.0
+
+
+def test_a_set_timeout_above_a_tight_maximum_is_still_refused() -> None:
+    """The cut applies only to the default: a timeout the file sets above the maximum fails."""
+    with pytest.raises(ConstraintsError) as caught:
+        parse_constraints(_V1_RUN + b"timeout = 31\n", limits=RunnerLimits(max_timeout=30))
+    assert (
+        str(caught.value) == "ascent.toml: [run] timeout must be at most 30 seconds for each case."
+    )
+    assert (caught.value.section, caught.value.key) == ("run", "timeout")
+
+
+def test_an_unset_stage_vcpus_on_a_one_vcpu_runner_is_one() -> None:
+    """With max_vcpus=1, a stage with no vcpus gets 1 vCPU, and vcpus = 2 is still refused."""
+    limits = RunnerLimits(max_vcpus=1)
+
+    assert parse_constraints(_STAGE.encode(), limits=limits).targets["solver"].vcpus == 1
+    with pytest.raises(ConstraintsError, match="vcpus must be 1 or an even number from 2 to 1"):
+        parse_constraints(f"{_STAGE}vcpus = 2\n".encode(), limits=limits)
+
+
 def test_the_default_limits_set_no_maximum_timeout() -> None:
     """With no runner limits, a long timeout parses."""
     assert parse_constraints(_V1_RUN + b"timeout = 86400\n").run_timeout == 86400.0
