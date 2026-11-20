@@ -2137,7 +2137,7 @@ def _load_cases(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
             continue
         try:
             case = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             case = None
         if not isinstance(case, dict) or "input" not in case or set(case) - _CASE_KEYS:
             raise ConstraintsError(

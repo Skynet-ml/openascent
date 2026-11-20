@@ -2745,6 +2745,10 @@ def test_a_cases_file_that_is_also_a_rule_file_is_refused(section: str) -> None:
             r"line 1 of 'data/cases\.jsonl' .* is not a case",
         ),
         (b'{"input": "caf\xe9"}\n', r"'data/cases\.jsonl', which is not UTF-8 text"),
+        (
+            b'{"input": ' + b"[" * 200_000 + b"]" * 200_000 + b"}\n",
+            r"line 1 of 'data/cases\.jsonl' .* is not a case",
+        ),
     ],
 )
 def test_a_bad_cases_file_fails_with_a_reason(tmp_path: Path, text: bytes, message: str) -> None:
