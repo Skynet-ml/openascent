@@ -388,3 +388,24 @@ def test_every_example_contract_passes_ascent_check(capsys):
     """
     for path in sorted((ROOT / "examples").glob("*/ascent.toml")):
         assert main(["check", str(path)]) == 0, capsys.readouterr().out
+
+
+def test_check_counts_every_error_of_a_capped_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A check of 600 errors shows 500 and a count line, and the last line counts all 600.
+
+    Args:
+        tmp_path: Scratch folder.
+        capsys: Captures the report.
+    """
+    unknown = "".join(f"k{n} = 1\n" for n in range(600))
+    path = _write(tmp_path, f'version = 1\n[run]\nentry = "run.py:main"\n{unknown}'.encode())
+
+    assert main(["check", path]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 502
+    assert lines[-2] == (
+        f"{path}: error: 100 more errors are not shown. Fix the errors above and check again."
+    )
+    assert lines[-1] == "600 errors, 0 warnings"

@@ -225,7 +225,7 @@ The module `openascent.contract` reads and checks `ascent.toml`. It uses only th
 - Only a file that is too large, or that is not valid TOML, stops the check at the first error.
 - `read_constraints` checks the named files only when `ascent.toml` itself has no error. When `ascent.toml` has an error, the error lists only the mistakes of `ascent.toml`. Fix them, then check again to see the mistakes of the named files.
 - A rule file or a `[data] cases` file reports only its first 100 mistakes, and one more diagnostic says so.
-- One error lists at most 500 diagnostics. When there are more, one last diagnostic counts the ones that are not shown.
+- One error lists at most 500 diagnostics. When there are more, one last diagnostic counts the ones that are not shown, and `error.hidden` holds that number. The count line of `ascent check` gives the full number of errors.
 - A valid file has its warnings in `contract.warnings`. No check gives a warning yet.
 - The parser does not convert a value. A value in another form fails, and the error gives the one valid form. For example, `"src/"` must be `"src"`, a host must be in lower case, and a list holds each value once.
 

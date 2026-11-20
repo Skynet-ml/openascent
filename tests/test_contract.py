@@ -4476,3 +4476,54 @@ def test_a_repeated_metric_file_does_not_skip_the_entry_check() -> None:
     assert [(line, key) for line, _, key, _ in errors] == [(5, "files"), (6, "entry")]
     assert "[metric] files holds 'm.sh' more than once." in errors[0][3]
     assert "[metric] entry ['bash', 'x.sh'] runs no file from [metric] files." in errors[1][3]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            b'version = 1\nservices = 1\n[run]\nentry = "run.py:main"\nservices = ["maps"]\n',
+            (2, None, "services", "ascent.toml: services must be a [services] table."),
+        ),
+        (
+            b'version = 1\nservics = 1\n[run]\nentry = "run.py:main"\nservices = ["maps"]\n',
+            (
+                2,
+                "servics",
+                None,
+                "ascent.toml: [servics] is not a supported section. Did you mean 'services'?",
+            ),
+        ),
+        (
+            b'version = 1\nrn = 1\n[metric]\nfiles = ["m.py"]\n',
+            (2, "rn", None, "ascent.toml: [rn] is not a supported section. Did you mean 'run'?"),
+        ),
+        (
+            b'version = 1\ntargt = 1\n[metric]\nfiles = ["m.py"]\n',
+            (
+                2,
+                "targt",
+                None,
+                "ascent.toml: [targt] is not a supported section. Did you mean 'target'?",
+            ),
+        ),
+        (
+            b'version = 1\ntarget = 1\n[metric]\nfiles = ["m.py"]\n',
+            (2, None, "target", "ascent.toml: target must be a [target] table."),
+        ),
+        (
+            b'version = 1\nrun = 1\n[metric]\nfiles = ["m.py"]\n',
+            (2, None, "run", "ascent.toml: run must be a [run] table."),
+        ),
+        (
+            b'version = 1\ndata = 1\n[run]\nentry = "run.py:main"\n[metric]\nfiles = ["m.py"]\n',
+            (2, None, "data", "ascent.toml: data must be a [data] table."),
+        ),
+    ],
+    ids=["services", "servics", "rn", "targt", "target", "run", "data"],
+)
+def test_a_section_that_is_not_a_table_gives_no_follow_on_error(
+    raw: bytes, expected: tuple[int, str | None, str | None, str]
+) -> None:
+    """A top-level value that is not a table gets its own error, and the rules that read it none."""
+    assert _errors(raw) == [expected]

@@ -96,11 +96,13 @@ def main(argv: list[str] | None = None) -> int:
             check.error("give an ascent.toml file, or --image --role <role>")
         if args.role is not None:
             check.error("--role needs --image")
-        diagnostics = _check_file(check, args.file)
+        diagnostics, hidden = _check_file(check, args.file)
         for diagnostic in diagnostics:
             print(_diagnostic_line(args.file, diagnostic))
+        # The last line of a capped check counts the hidden errors and is no error itself.
         errors = sum(diagnostic.level == ERROR for diagnostic in diagnostics)
-        warnings = len(diagnostics) - errors
+        errors += hidden - 1 if hidden else 0
+        warnings = sum(diagnostic.level == WARNING for diagnostic in diagnostics)
         print(f"{_count(errors, ERROR)}, {_count(warnings, WARNING)}")
         return 1 if errors else 0
     try:
@@ -125,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _check_file(check: argparse.ArgumentParser, path: str) -> list[Diagnostic]:
+def _check_file(check: argparse.ArgumentParser, path: str) -> tuple[list[Diagnostic], int]:
     """Check one ``ascent.toml`` file with the full parser.
 
     Args:
@@ -133,16 +135,17 @@ def _check_file(check: argparse.ArgumentParser, path: str) -> list[Diagnostic]:
         path: The path of the file.
 
     Returns:
-        Every error and warning of the file, in the parser's order.
+        Every error and warning that the check shows, in the parser's order,
+        and the number of errors past the cap that it does not show.
     """
     try:
         raw = Path(path).read_bytes()
     except OSError as error:
         check.error(f"cannot read {path}: {error}")
     try:
-        return list(parse_constraints(raw).warnings)
+        return list(parse_constraints(raw).warnings), 0
     except ConstraintsError as error:
-        return list(error.errors)
+        return list(error.errors), error.hidden
 
 
 def _diagnostic_line(path: str, diagnostic: Diagnostic) -> str:

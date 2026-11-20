@@ -197,6 +197,8 @@ class ConstraintsError(ValueError):
 
     ``errors`` holds every problem of one check, in a fixed order. The text,
     ``section`` and ``key`` of the error are those of the first problem.
+    ``hidden`` counts the errors past the cap that ``errors`` leaves out; the
+    last item of ``errors`` then says how many they are.
     """
 
     def __init__(
@@ -206,6 +208,7 @@ class ConstraintsError(ValueError):
         section: str | None = None,
         key: str | None = None,
         errors: Sequence[Diagnostic] = (),
+        hidden: int = 0,
     ) -> None:
         """Keep the message and where in the file the problem is, so an editor can show it there.
 
@@ -216,10 +219,12 @@ class ConstraintsError(ValueError):
             key: The setting in that table, such as ``editable``;
                 ``None`` when the whole table is wrong.
             errors: Every problem of the check; empty for this one problem only.
+            hidden: The errors past the cap that ``errors`` does not hold.
         """
         super().__init__(message)
         self.section = section
         self.key = key
+        self.hidden = hidden
         self.errors = tuple(errors) or (
             Diagnostic(level=ERROR, section=section, key=key, message=message),
         )
@@ -273,8 +278,9 @@ class _Problems:
         if not self.errors:
             return
         errors = self.errors
+        hidden = 0
         if text is not None:
-            hidden = len(errors) - _MAX_ERRORS
+            hidden = max(len(errors) - _MAX_ERRORS, 0)
             errors = _with_lines(errors[:_MAX_ERRORS], text)
             if hidden > 0:
                 errors.append(
@@ -285,7 +291,9 @@ class _Problems:
                     )
                 )
         first = errors[0]
-        raise ConstraintsError(first.message, section=first.section, key=first.key, errors=errors)
+        raise ConstraintsError(
+            first.message, section=first.section, key=first.key, errors=errors, hidden=hidden
+        )
 
 
 # Contract names are at most four parts deep, such as services.maps.headers.X;
@@ -1182,7 +1190,7 @@ def _network(section: Mapping[str, Any], label: str, problems: _Problems) -> tup
 
 
 def _role(
-    section: Mapping[str, Any], label: str, declared: Collection[str], problems: _Problems
+    section: Mapping[str, Any], label: str, declared: Collection[str] | None, problems: _Problems
 ) -> dict[str, Any]:
     """Read the settings every role shares: mcp, network, services and illegal.
 
@@ -1191,7 +1199,8 @@ def _role(
     Args:
         section: The parsed ``[proposer]`` or ``[target.<name>]`` table.
         label: The table as the file names it, used in errors.
-        declared: The name of each ``[services.<name>]`` table of the file, valid or not.
+        declared: The name of each ``[services.<name>]`` table of the file, valid or not;
+            ``None`` when the file's services value is not a table, so no name is checked.
         problems: Records each error.
 
     Returns:
@@ -1199,7 +1208,7 @@ def _role(
     """
     named = _names(section, "services", label, problems)
     for name in named:
-        if name not in declared:
+        if declared is not None and name not in declared:
             problems.add(
                 f"{CONSTRAINTS_FILE}: {label} services names '{name}', but the file has no"
                 f" [services.{name}] table.",
@@ -1208,7 +1217,7 @@ def _role(
     return {
         "mcp": problems.check(_mcp, section, label),
         "network": _network(section, label, problems),
-        "services": tuple(name for name in named if name in declared),
+        "services": tuple(name for name in named if declared is not None and name in declared),
         "illegal_file": problems.check(_illegal_file, section, label),
     }
 
@@ -1374,14 +1383,19 @@ def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...
 
 
 def _target(
-    section: Any, name: str, declared: Collection[str], limits: RunnerLimits, problems: _Problems
+    section: Any,
+    name: str,
+    declared: Collection[str] | None,
+    limits: RunnerLimits,
+    problems: _Problems,
 ) -> RoleEnvironment | None:
     """Read one ``[target.<name>]`` stage.
 
     Args:
         section: The value under the stage's name.
         name: The stage's name.
-        declared: The name of each ``[services.<name>]`` table of the file.
+        declared: The name of each ``[services.<name>]`` table of the file, or
+            ``None`` when the file's services value is not a table.
         limits: The runner's limits.
         problems: Records every error of the stage: it is not a named table,
             or a setting is missing, unknown or malformed.
@@ -2372,6 +2386,9 @@ def parse_constraints(
     present = {name: bool(value) or not isinstance(value, dict) for name, value in document.items()}
     # Service names of a misspelled [services] table, such as [servics.maps].
     misspelled_services: list[str] = []
+    # A services value that is not a table names no services, so no role
+    # gets an error for a service that the file does not declare.
+    services_unknown = False
     for name, section in list(document.items()):
         if name not in _SECTIONS and name not in _NAMED_SECTIONS:
             del document[name]
@@ -2382,18 +2399,20 @@ def parse_constraints(
                 + _did_you_mean(name, (*_TOP_TABLES, *_TOP_KEYS)),
                 section=name,
             )
-            if not isinstance(section, dict):
-                continue
             # The misspelling already has its error, so the rules that need the
-            # section it names count that section as present, as _missing does for keys.
+            # section it names count that section as present, as _missing does
+            # for keys. This holds also for a value that is not a table, such as rn = 1.
             close = difflib.get_close_matches(name, sorted(_TOP_TABLES), n=1)
             if close:
                 present[close[0]] = True
-                if close[0] == "services":
+                if close[0] == "services" and isinstance(section, dict):
                     misspelled_services += section
+                elif close[0] == "services":
+                    services_unknown = True
             continue
         if not isinstance(section, dict):
             problems.add(f"{CONSTRAINTS_FILE}: {name} must be a [{name}] table.", key=name)
+            services_unknown |= name == "services"
             del document[name]
             continue
         if name in _NAMED_SECTIONS:
@@ -2437,7 +2456,7 @@ def parse_constraints(
             key="editable",
         )
     # Every declared name counts, so a role that names a service with an error gets no second one.
-    declared = (*document.get("services", {}), *misspelled_services)
+    declared = None if services_unknown else (*document.get("services", {}), *misspelled_services)
     # A stage or service with an error keeps its valid parts, so the rules
     # across sections still check them and a second mistake is not hidden.
     services = {
