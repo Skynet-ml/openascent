@@ -134,7 +134,7 @@ The `examples` folder holds the same exact-match metric in Python, Node.js, Go, 
 `ascent check --image --role <candidate|metric>` runs inside a box and checks that the box image speaks the protocol.
 The user image only gives the tools. The OpenAscent package in the image speaks the protocol.
 A runner runs this command in each image before the run. A non-zero exit fails the run.
-The command needs no network. It ends in less than 30 seconds: each check stops after 8 seconds.
+The command needs no network. A role runs at most three subprocesses, and each one stops after 8 seconds, so a role ends in about 24 seconds.
 
 The `metric` role checks:
 
@@ -184,7 +184,7 @@ To add the package to any image, add one line with a pinned version, for example
 RUN pip install openascent==0.1.0
 ```
 
-The image needs Python 3.12 or later. Until the package is on PyPI, install it from a release tag (see "Install").
+The image needs Python 3.12 or later.
 
 ## A short metric
 
@@ -462,7 +462,13 @@ The package does not validate records. It has no dependency for that. Use a JSON
 
 ## Install
 
-Install from the repository, at a release tag:
+Install from PyPI, with a pinned version:
+
+```sh
+pip install openascent==0.1.0
+```
+
+Or install from the repository, at a release tag:
 
 ```sh
 pip install git+https://github.com/Skynet-ml/openascent@<tag>

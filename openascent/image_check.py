@@ -18,8 +18,8 @@ from .result import AscentError, check_metric_result, load_json
 PROTOCOL_VERSION = 1
 ROLES = ("candidate", "metric")
 SHELL = "/bin/sh"
-# Each check waits at most this long, so a role with three checks ends in
-# less than 30 seconds.
+# Each subprocess waits at most this long. A role runs at most three
+# subprocesses, so a role ends in about 24 seconds.
 CHECK_TIMEOUT_S = 8.0
 _SAMPLE_METRIC = (
     'def score(output, expected=None):\n    return {"score": 1.0 if output == expected else 0.0}\n'
@@ -119,8 +119,9 @@ def _run(argv: list[str], cwd: str | None = None) -> tuple[bool, str]:
     except OSError as error:
         return False, f"{argv[0]} cannot start: {error}"
     if done.returncode != 0:
+        message = f"{argv[0]} exited with code {done.returncode}"
         tail = done.stderr.strip().splitlines()[-1:] or [""]
-        return False, f"{argv[0]} exited with code {done.returncode}: {tail[0]}".rstrip(": ")
+        return False, f"{message}: {tail[0]}" if tail[0] else message
     return True, done.stdout
 
 

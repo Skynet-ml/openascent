@@ -108,6 +108,16 @@ def test_broken_runtime_fails(tmp_path):
     assert "broken" in runtime["message"]
 
 
+def test_failure_message_keeps_the_stderr_tail(tmp_path):
+    """The message keeps a trailing colon of stderr, and has no colon when stderr is empty."""
+    colon = fake(tmp_path, "colon.sh", "printf 'bad value: ' >&2\nexit 3\n")
+    report = check_image("candidate", python=PY, ascent=ascent_on_path(), shell=colon)
+    assert report["checks"][2]["message"] == f"{colon} exited with code 3: bad value:"
+    quiet = fake(tmp_path, "quiet.sh", "exit 4\n")
+    report = check_image("candidate", python=PY, ascent=ascent_on_path(), shell=quiet)
+    assert report["checks"][2]["message"] == f"{quiet} exited with code 4"
+
+
 def test_unknown_runtime_path_fails(monkeypatch):
     """An interpreter that cannot tell its own path fails the metric checks."""
     monkeypatch.setattr(sys, "executable", "")
