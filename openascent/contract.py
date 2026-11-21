@@ -629,7 +629,8 @@ class RoleEnvironment:
     illegal_file: str | None = None
     # The servers of the mcp file; read_constraints fills them from the same snapshot (E49).
     mcp_servers: tuple[McpServer, ...] = ()
-    # Only [run] and [metric] set one of these two (SKY-887). None keeps the runner's own image.
+    # Only [run] and [metric] set one of these two (SKY-887); [proposer] and [target.<name>]
+    # refuse both keys, so they stay None there. None keeps the runner's own image.
     # image is "name@sha256:<digest>"; dockerfile is a repository path, built in its own folder.
     image: str | None = None
     dockerfile: str | None = None
@@ -1389,6 +1390,33 @@ def _build_context_errors(
                 )
             )
     return errors
+
+
+def _hidden_context_error(dockerfile: str, hidden: Iterable[str]) -> str | None:
+    """Explain why a ``[run]`` Dockerfile's build context must not overlap a hidden path.
+
+    The image build can copy any file of its context into the candidate box, so a
+    context that overlaps a scorer-only path would show the hidden scorer to a version.
+
+    Args:
+        dockerfile: The repository path of the ``[run]`` Dockerfile.
+        hidden: The scorer-only paths, without ``ascent.toml``.
+
+    Returns:
+        The error message, or ``None`` when the context overlaps no hidden path.
+    """
+    context = posixpath.dirname(dockerfile) or "."
+    overlap = next(
+        (path for path in hidden if _inside(path, (context,)) or _inside(context, (path,))), None
+    )
+    if overlap is None:
+        return None
+    return (
+        f"{CONSTRAINTS_FILE}: [run] dockerfile names '{dockerfile}', so the build context is the"
+        f" folder '{context}', and it overlaps '{overlap}', which only the scorer may read. The"
+        " image could copy the hidden scorer into the candidate box. Put the Dockerfile in a"
+        " folder apart from the [metric] and [data] files."
+    )
 
 
 def _vcpus(value: Any, label: str, section: str, limits: RunnerLimits) -> int:
@@ -2796,6 +2824,20 @@ def _parse_constraints(
         run_entry,
         [path for path in metric_only if path is not None],
     )
+    if run_role["dockerfile"] is not None:
+        metric_dockerfile = metric_role["dockerfile"]
+        hidden_paths = [
+            *scoring,
+            *(path for path in metric_only if path is not None),
+            *(
+                (metric_dockerfile,)
+                if metric_dockerfile not in (None, run_role["dockerfile"])
+                else ()
+            ),
+        ]
+        message = _hidden_context_error(run_role["dockerfile"], hidden_paths)
+        if message is not None:
+            problems.add(message, section="run", key="dockerfile")
     run_vcpus = (
         problems.check(_vcpus, run_section["vcpus"], "[run]", "run", limits)
         if "vcpus" in run_section
@@ -2970,7 +3012,8 @@ def _check_dockerfiles(constraints: RepoConstraints, archive: Path) -> None:
 
     Raises:
         ConstraintsError: With one error for each Dockerfile that is missing, or is a link or
-            folder, which protection by path would not cover.
+            folder, which protection by path would not cover, and one for each build context
+            folder that holds a link at any depth.
     """
     if not constraints.dockerfiles:
         return
@@ -2979,6 +3022,23 @@ def _check_dockerfiles(constraints: RepoConstraints, archive: Path) -> None:
     problems = _Problems()
     for label, path in constraints.dockerfiles.items():
         setting = f"{label} dockerfile"
+        context = posixpath.dirname(path) or "."
+        # Protection matches paths, so a link in the context could pull any file into the build.
+        link = next(
+            (
+                name
+                for name, entry in sorted(members.items())
+                if (entry.issym() or entry.islnk()) and _inside(name, (context,))
+            ),
+            None,
+        )
+        if link is not None:
+            problems.add(
+                f"{CONSTRAINTS_FILE}: {setting} names '{path}', and its build context '{context}'"
+                f" holds the link '{link}'. Remove the link from the folder, so that the build"
+                " reads only the files of the folder.",
+                **_at(setting),
+            )
         member = members.get(path)
         if member is None:
             problems.add(
@@ -3668,8 +3728,8 @@ def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
 
     Returns:
         ``ascent.toml``, the ``[metric]`` files, exploit folder, reference,
-        rule file and ``mcp`` file, and the ``[data] cases`` file, without
-        the keys the file does not set.
+        rule file, ``mcp`` file and Dockerfile, and the ``[data] cases`` file,
+        without the keys the file does not set.
     """
     metric = constraints.metric
     hidden = (
@@ -3679,6 +3739,7 @@ def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
         constraints.cases_file,
         constraints.metric_role.illegal_file,
         constraints.metric_role.mcp,
+        constraints.metric_role.dockerfile,
     )
     visible = {
         constraints.instructions_file,
@@ -3686,6 +3747,7 @@ def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
         constraints.proposer.mcp,
         constraints.run_role.illegal_file,
         constraints.run_role.mcp,
+        constraints.run_role.dockerfile,
         *(stage.illegal_file for stage in constraints.targets.values()),
         *(stage.mcp for stage in constraints.targets.values()),
     }
@@ -3721,7 +3783,8 @@ def effective_environment(
             an editable path lies inside a path from ``scorer_only_paths``, or the protected paths
             (always including the file itself) cover every editable path, or an editable path
             that no protected path covers overlaps the folder of a ``[run]`` or ``[metric]``
-            Dockerfile, which is the build context.
+            Dockerfile, which is the build context, or the ``[run]`` build context overlaps a
+            path from ``scorer_only_paths`` other than ``ascent.toml``.
     """
     if constraints is None:
         editable = tuple(approved_editable)
@@ -3797,6 +3860,12 @@ def effective_environment(
     # The brief names every editable path, so one inside
     # a scorer-only path would name a hidden path.
     hidden = scorer_only_paths(constraints)
+    if constraints.run_role.dockerfile is not None:
+        message = _hidden_context_error(
+            constraints.run_role.dockerfile, [path for path in hidden if path != CONSTRAINTS_FILE]
+        )
+        if message is not None:
+            raise ConstraintsError(message, section="run", key="dockerfile")
     hidden_editable = [path for path in editable if _inside(path, hidden)]
     if hidden_editable:
         raise ConstraintsError(

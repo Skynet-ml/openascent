@@ -273,8 +273,12 @@ dockerfile = "docker/metric/Dockerfile"
 
 - `image` must be pinned by its digest: `name@sha256:<64 lowercase hex characters>`. The name can start with a registry host and a port. A tag, such as `python:3.12`, can change under a run, so it fails. A tag with a digest fails too: write the digest only.
 - `dockerfile` is the repository path of one file. It gets the same path checks as the other keys that name one file. `read_constraints` also checks that the snapshot holds it as a regular file, not a link or a folder.
+- The package does not read the Dockerfile, so it does not check its `FROM` line. Pin each `FROM` image by its digest, for example `FROM python@sha256:<digest>`, so that the build gives the same image every time.
 - The Dockerfile is always a protected path, so a version cannot change it.
 - The build context is the folder of the Dockerfile. No editable path can overlap that folder, so a version cannot change what the image builds from. A protected path that covers the overlap is allowed. The check runs on `[paths] editable` in the file, and again on the editable paths of the run. A Dockerfile at the root of the repository has the whole repository as its context, so put it in its own folder.
+- The `[run]` build context cannot overlap a path that only the scorer reads: the `[metric]` files, exploit folder, reference, rule file, `mcp` file and Dockerfile, and the `[data] cases` file. Otherwise the candidate image could copy the hidden scorer. The `[metric]` build context can hold them.
+- `read_constraints` refuses a symbolic link or a hard link anywhere in a build context folder, because a link could pull a file from outside the folder into the build.
+- The `[metric]` Dockerfile is a scorer-only path, so `scorer_only_paths` lists it. When `[run]` names the same Dockerfile, it stays visible.
 - `RoleEnvironment.image` and `RoleEnvironment.dockerfile` hold the values for `run_role` and `metric_role`. Each is `None` when the key is not set, and the runner then uses its own image. `RepoConstraints.dockerfiles` maps `[run]` and `[metric]` to their Dockerfile paths.
 - A contract that sets neither key parses exactly as before.
 

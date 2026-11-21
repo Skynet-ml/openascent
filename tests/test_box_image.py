@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import tarfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from openascent.contract import (
     effective_environment,
     parse_constraints,
     read_constraints,
+    scorer_only_paths,
 )
 from openascent.schema import contract_schema
 
@@ -233,25 +235,108 @@ def test_the_dockerfile_is_a_protected_path(section: str) -> None:
         ("Dockerfile", "src"),
     ],
 )
+@pytest.mark.parametrize("section", ["run", "metric"])
 def test_a_build_context_that_holds_an_editable_path_fails_the_check(
-    dockerfile: str, editable: str
+    section: str, dockerfile: str, editable: str
 ) -> None:
     """The build context is the Dockerfile's folder, and no editable path may overlap it."""
     errors = _errors(
-        _contract(run=f'dockerfile = "{dockerfile}"', paths=f'editable = ["{editable}"]')
+        _contract(**{section: f'dockerfile = "{dockerfile}"'}, paths=f'editable = ["{editable}"]')
     )
 
     context = dockerfile.rpartition("/")[0] or "."
+    expected = (
+        section,
+        "dockerfile",
+        f"{CONSTRAINTS_FILE}: [{section}] dockerfile names '{dockerfile}', so the build context is"
+        f" the folder '{context}', and the editable path '{editable}' overlaps it. A version"
+        " could change what the image builds from. Put the Dockerfile in a folder that holds"
+        " no editable path, or protect that folder.",
+    )
+    # A root [run] context also holds the hidden exploit folder, which has its own error.
+    assert errors[0] == expected
+    assert len(errors) == (2 if (section, context) == ("run", ".") else 1)
+
+
+def test_an_editable_file_in_the_context_that_is_also_protected_parses() -> None:
+    """Protected paths win over editable ones, so a protected editable file is not open."""
+    constraints = parse_constraints(
+        _contract(
+            run='dockerfile = "docker/Dockerfile"',
+            paths='editable = ["src", "docker/app.py"]\nprotected = ["docker/app.py"]',
+        )
+    )
+
+    environment = effective_environment(
+        constraints, approved_editable=["src", "docker"], approved_setup=None
+    )
+
+    assert "docker/Dockerfile" in environment.protected_paths
+    assert "docker/app.py" in environment.protected_paths
+
+
+@pytest.mark.parametrize(
+    ("metric", "dockerfile", "hidden"),
+    [
+        ('files = ["eval/score.py"]', "eval/Dockerfile", "eval/score.py"),
+        ('files = ["eval"]', "eval/box/Dockerfile", "eval"),
+        ('reference = "box/ref.txt"', "box/Dockerfile", "box/ref.txt"),
+        ('dockerfile = "box/metric.Dockerfile"', "box/Dockerfile", "box/metric.Dockerfile"),
+    ],
+)
+def test_a_run_build_context_that_overlaps_a_hidden_path_fails_the_check(
+    metric: str, dockerfile: str, hidden: str
+) -> None:
+    """The candidate image must not be able to copy the hidden scorer from its build context."""
+    raw = _contract(run=f'dockerfile = "{dockerfile}"', metric=metric)
+
+    errors = _errors(raw)
+
+    context = dockerfile.rpartition("/")[0]
     assert errors == [
         (
             "run",
             "dockerfile",
             f"{CONSTRAINTS_FILE}: [run] dockerfile names '{dockerfile}', so the build context is"
-            f" the folder '{context}', and the editable path '{editable}' overlaps it. A version"
-            " could change what the image builds from. Put the Dockerfile in a folder that holds"
-            " no editable path, or protect that folder.",
+            f" the folder '{context}', and it overlaps '{hidden}', which only the scorer may read."
+            " The image could copy the hidden scorer into the candidate box. Put the Dockerfile"
+            " in a folder apart from the [metric] and [data] files.",
         )
     ]
+
+
+def test_the_environment_refuses_a_run_build_context_that_overlaps_a_hidden_path() -> None:
+    """effective_environment checks the same rule on a contract built in code."""
+    constraints = parse_constraints(_contract(metric='files = ["eval/score.py"]'))
+    constraints = replace(constraints, run_role=RoleEnvironment(dockerfile="eval/Dockerfile"))
+
+    with pytest.raises(ConstraintsError, match="which only the scorer may read") as caught:
+        effective_environment(constraints, approved_editable=["src"], approved_setup=None)
+
+    assert (caught.value.section, caught.value.key) == ("run", "dockerfile")
+
+
+def test_a_metric_build_context_may_hold_the_hidden_scorer() -> None:
+    """The metric box may build from its own hidden files."""
+    constraints = parse_constraints(
+        _contract(metric='files = ["eval"]\ndockerfile = "eval/Dockerfile"')
+    )
+
+    effective_environment(constraints, approved_editable=["src"], approved_setup=None)
+
+    assert constraints.metric_role.dockerfile == "eval/Dockerfile"
+
+
+def test_the_metric_dockerfile_is_hidden_unless_the_run_names_it_too() -> None:
+    """Only the scorer reads the metric Dockerfile, unless the candidate box builds from it too."""
+    alone = parse_constraints(_contract(metric='dockerfile = "m/Dockerfile"'))
+    shared = parse_constraints(
+        _contract(run='dockerfile = "m/Dockerfile"', metric='dockerfile = "m/Dockerfile"')
+    )
+
+    assert "m/Dockerfile" in scorer_only_paths(alone)
+    assert "m/Dockerfile" not in scorer_only_paths(shared)
+    assert scorer_only_paths(parse_constraints(_BASE)) == (CONSTRAINTS_FILE, ".optimize/exploits")
 
 
 def test_the_approved_editable_paths_also_obey_the_build_context_rule() -> None:
@@ -289,8 +374,9 @@ def test_read_constraints_checks_that_the_dockerfile_is_a_regular_file(tmp_path:
 
     with pytest.raises(ConstraintsError) as caught:
         read_constraints(_archive(tmp_path, files, links={"m/Dockerfile": "../docker/Dockerfile"}))
-    assert [(d.section, d.key) for d in caught.value.errors] == [("metric", "dockerfile")]
-    assert "must be a regular file, not a link or folder" in caught.value.errors[0].message
+    assert [(d.section, d.key) for d in caught.value.errors] == [("metric", "dockerfile")] * 2
+    assert "holds the link 'm/Dockerfile'" in caught.value.errors[0].message
+    assert "must be a regular file, not a link or folder" in caught.value.errors[1].message
 
     with pytest.raises(ConstraintsError, match="but the repository has no such file"):
         read_constraints(_archive(tmp_path, files))
@@ -299,6 +385,20 @@ def test_read_constraints_checks_that_the_dockerfile_is_a_regular_file(tmp_path:
     constraints = read_constraints(_archive(tmp_path, files))
     assert constraints is not None
     assert constraints.dockerfiles == {"[run]": "docker/Dockerfile", "[metric]": "m/Dockerfile"}
+
+
+@pytest.mark.parametrize("link", ["docker/data", "docker/deep/inner/data"])
+def test_a_link_anywhere_in_the_build_context_is_refused(tmp_path: Path, link: str) -> None:
+    """A link in the context could pull a file from outside the folder into the build."""
+    raw = _contract(run='dockerfile = "docker/Dockerfile"')
+    files = {CONSTRAINTS_FILE: raw, "docker/Dockerfile": b"FROM scratch\n"}
+
+    with pytest.raises(ConstraintsError) as caught:
+        read_constraints(_archive(tmp_path, files, links={link: "../../eval/score.py"}))
+
+    assert [(d.section, d.key) for d in caught.value.errors] == [("run", "dockerfile")]
+    assert f"its build context 'docker' holds the link '{link}'" in caught.value.errors[0].message
+    assert read_constraints(_archive(tmp_path, files, links={"other/data": "x"})) is not None
 
 
 def test_ascent_check_accepts_each_key_and_refuses_the_bad_forms(tmp_path: Path, capsys) -> None:
