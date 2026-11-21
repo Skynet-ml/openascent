@@ -209,7 +209,22 @@
               "minimize"
             ]
           }
+        },
+        "image": {
+          "type": "string",
+          "pattern": "^(?:[a-z0-9-]+(?:\\.[a-z0-9-]+)*(?::[0-9]{1,5})?/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*@sha256:[0-9a-f]{64}$",
+          "description": "The box image, pinned by its digest: name@sha256:<64 lowercase hex>."
+        },
+        "dockerfile": {
+          "type": "string",
+          "description": "The path of a Dockerfile; its folder is the build context."
         }
+      },
+      "not": {
+        "required": [
+          "image",
+          "dockerfile"
+        ]
       }
     },
     "run": {
@@ -279,11 +294,26 @@
             }
           ],
           "description": "1, or an even number from 2 to 32 with the default runner limits."
+        },
+        "image": {
+          "type": "string",
+          "pattern": "^(?:[a-z0-9-]+(?:\\.[a-z0-9-]+)*(?::[0-9]{1,5})?/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*@sha256:[0-9a-f]{64}$",
+          "description": "The box image, pinned by its digest: name@sha256:<64 lowercase hex>."
+        },
+        "dockerfile": {
+          "type": "string",
+          "description": "The path of a Dockerfile; its folder is the build context."
         }
       },
       "required": [
         "entry"
-      ]
+      ],
+      "not": {
+        "required": [
+          "image",
+          "dockerfile"
+        ]
+      }
     },
     "data": {
       "type": "object",
