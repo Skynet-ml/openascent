@@ -175,10 +175,11 @@ def test_every_object_is_closed():
     assert all(obj["additionalProperties"] is False for obj in objects)
 
 
-def test_required_keys_are_the_version_1_keys():
-    """Every key is required except the three verdict keys and the version 2 boxes key."""
+def test_required_keys_are_all_but_the_optional_keys():
+    """Every key is required except the verdict keys, boxes and metric_setup."""
     assert set(SCHEMA["required"]) == set(SCHEMA["properties"]) - {
         "boxes",
+        "metric_setup",
         "target_reached",
         "requirements_passed",
         "failed_requirements",
@@ -310,6 +311,9 @@ INVALID = [
     ("true as limit", {"failed_requirements": [_failed(limit=True)]}),
     ("true as value", {"failed_requirements": [_failed(value=True)]}),
     ("failed requirement reason as number", {"failed_requirements": [_failed(reason=1)]}),
+    ("empty metric setup", {"metric_setup": ""}),
+    ("metric setup as list", {"metric_setup": ["make"]}),
+    ("metric setup null", {"metric_setup": None}),
     ("requirements passed with a failed requirement", {"requirements_passed": True}),
     ("requirements failed with no failed requirement", {"failed_requirements": []}),
 ]
@@ -337,6 +341,21 @@ INVALID_V2 = [
     ("source null", {"boxes": {"run": _box(source=None)}}),
     ("input hash as number", {"boxes": {"run": _box(input_hash=1)}}),
     ("build log as number", {"boxes": {"run": _box(build_log=1)}}),
+    (
+        "image source with an input hash",
+        {"boxes": {"metric": BOX_METRIC | {"input_hash": "sha256:" + "7" * 64}}},
+    ),
+    (
+        "image source with a build log",
+        {"boxes": {"metric": BOX_METRIC | {"build_log": "image-build:42"}}},
+    ),
+    ("dockerfile source with a null input hash", {"boxes": {"run": _box(input_hash=None)}}),
+    ("dockerfile source with an empty input hash", {"boxes": {"run": _box(input_hash="")}}),
+    ("input hash without the sha256 prefix", {"boxes": {"run": _box(input_hash="7" * 64)}}),
+    ("input hash too short", {"boxes": {"run": _box(input_hash="sha256:" + "7" * 63)}}),
+    ("input hash with a newline", {"boxes": {"run": _box(input_hash="sha256:" + "7" * 64 + "\n")}}),
+    ("dockerfile source with a null build log", {"boxes": {"run": _box(build_log=None)}}),
+    ("dockerfile source with an empty build log", {"boxes": {"run": _box(build_log="")}}),
 ]
 
 
@@ -407,6 +426,8 @@ VALID = [
     ("version 2 with both boxes", _v2()),
     ("version 2 with a run box only", _v2(run=BOX_RUN)),
     ("version 2 with a metric box only", _v2(metric=BOX_METRIC)),
+    ("version 1 with a metric setup", _record(metric_setup="pip install -r requirements.txt")),
+    ("version 2 with a metric setup", _v2() | {"metric_setup": "pip install -r requirements.txt"}),
     (
         "version 2 with every nullable key null",
         _minimal() | {"record_version": 2, "boxes": {"run": BOX_RUN}},

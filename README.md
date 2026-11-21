@@ -440,7 +440,7 @@ A reader uses the record to check a score by hand.
 
 ### The keys
 
-The record is a closed object. An unknown key is an error. All keys are required, except the three verdict keys and `boxes`.
+The record is a closed object. An unknown key is an error. All keys are required, except the three verdict keys, `metric_setup` and `boxes`.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
@@ -448,6 +448,7 @@ The record is a closed object. An unknown key is an error. All keys are required
 | `contract_sha256` | SHA-256 hex | The hash of the bytes of the contract file `ascent.toml`. |
 | `metric_sha256` | SHA-256 hex | The hash of the metric files (see the rule below). |
 | `metric_source` | `"repository"` or `"request"` | Where the metric files come from. |
+| `metric_setup` | string | The `[metric] setup` command of the contract, not empty. Present only when the contract sets one. |
 | `cases_sha256` | SHA-256 hex or `null` | The hash of the cases. `null` when the run has no cases. |
 | `cases_source` | `"file"`, `"request"` or `null` | Where the cases come from. `null` exactly when `cases_sha256` is `null`. |
 | `base_commit` | full commit SHA | The commit of the repository before the change: 40 lowercase hex characters, or 64 in a SHA-256 repository. |
@@ -483,8 +484,10 @@ Each box is a closed object with exactly these keys:
 
 - `digest`: the digest of the image that the box used, `sha256:` and 64 lowercase hex characters.
 - `source`: `"image"` or `"dockerfile"`, the contract key that gives the image.
-- `input_hash`: the hash of the build inputs, a string. `null` for `"image"`.
-- `build_log`: the reference of the build log, for example `image-build:<id>`. `null` for `"image"`.
+- `input_hash`: the hash of the build inputs, `sha256:` and 64 lowercase hex characters. `null` for `"image"`.
+- `build_log`: the reference of the build log, a string that is not empty, for example `image-build:<id>`. `null` for `"image"`.
+
+For `"image"`, `input_hash` and `build_log` are both `null`. For `"dockerfile"`, neither is `null`.
 
 ### The hashes
 
@@ -511,9 +514,16 @@ Each file gives one part: `<path>\0<length>\0<hash>`.
 `\0` is one zero byte.
 The parts are in sorted path order: the order of the paths as UTF-8 bytes.
 The parts join with no byte between them. Each part ends with exactly 64 hex characters, so the join has only one meaning.
-`metric_sha256` is the hash of the joined parts. There is no special first part and no fixed path.
+`metric_sha256` is the hash of the joined parts.
 Metric code that comes in the run request counts as one file.
 Its path is the path where the runner puts the file to run the metric, relative to the repository root.
+
+Two settings of the contract each give one more part, with a fixed path. A path that starts with `/` is never a file path, so these paths are free:
+
+- `metric_setup` in the record gives the part `/[metric] setup\0<length>\0<hash>`. `<length>` is the byte length of the command in UTF-8. `<hash>` is the SHA-256 hex of those bytes.
+- A `metric` box in `boxes` gives the part `/[metric] image\0<length>\0<hash>`. `<length>` is the byte length of the box `digest` text in UTF-8, always 71. `<hash>` is the SHA-256 hex of those bytes.
+
+These parts go into the same sorted path order as the file parts. The command below hashes files only. For a record with these parts, add them to the join yourself.
 
 Run this in the repository root. Give the path of each metric file in the form above, for example `lib/util.py`, not `./lib/util.py`.
 

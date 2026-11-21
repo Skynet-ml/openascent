@@ -31,12 +31,17 @@
       "$ref": "#/$defs/sha256"
     },
     "metric_sha256": {
-      "description": "SHA-256 of the framed parts of the metric files, in sorted path order.",
+      "description": "SHA-256 of the framed parts of the metric files, and of the metric setup and the metric box image when present, in sorted path order.",
       "$ref": "#/$defs/sha256"
     },
     "metric_source": {
       "description": "Where the metric files come from: the repository at base_commit, or the run request.",
       "enum": ["repository", "request"]
+    },
+    "metric_setup": {
+      "description": "The [metric] setup command of the contract. Present only when the contract sets one.",
+      "type": "string",
+      "minLength": 1
     },
     "cases_sha256": {
       "description": "SHA-256 of the cases file bytes, or of the compact sorted-key JSON of the request cases. Null when the run has no cases.",
@@ -180,14 +185,17 @@
           "enum": ["image", "dockerfile"]
         },
         "input_hash": {
-          "description": "The hash of the build inputs, or null for an image source.",
-          "type": ["string", "null"]
+          "description": "The hash of the build inputs, sha256: and 64 lowercase hex characters. Null for an image source.",
+          "anyOf": [{"$ref": "#/$defs/image_digest"}, {"type": "null"}]
         },
         "build_log": {
-          "description": "The reference of the build log, for example image-build:<id>, or null for an image source.",
-          "type": ["string", "null"]
+          "description": "The reference of the build log, for example image-build:<id>. Null for an image source.",
+          "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]
         }
-      }
+      },
+      "if": {"properties": {"source": {"const": "image"}}, "required": ["source"]},
+      "then": {"properties": {"input_hash": {"type": "null"}, "build_log": {"type": "null"}}},
+      "else": {"properties": {"input_hash": {"type": "string"}, "build_log": {"type": "string"}}}
     },
     "positions": {
       "type": "array",
