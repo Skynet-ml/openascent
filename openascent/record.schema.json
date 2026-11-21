@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Skynet-ml/openascent/blob/main/openascent/record.schema.json",
-  "title": "OpenAscent run record, version 1",
+  "title": "OpenAscent run record, version 1 or 2",
   "description": "The record that a runner returns with the run result. A reader uses it to check a score by hand.",
   "type": "object",
   "additionalProperties": false,
@@ -23,20 +23,25 @@
   ],
   "properties": {
     "record_version": {
-      "description": "The version of the record format.",
-      "const": 1
+      "description": "The version of the record format. Version 2 adds the boxes key.",
+      "enum": [1, 2]
     },
     "contract_sha256": {
       "description": "SHA-256 of the bytes of the contract file ascent.toml.",
       "$ref": "#/$defs/sha256"
     },
     "metric_sha256": {
-      "description": "SHA-256 of the framed parts of the metric files, in sorted path order.",
+      "description": "SHA-256 of the framed parts of the metric files, and of the metric setup and the metric box image when present, in sorted path order.",
       "$ref": "#/$defs/sha256"
     },
     "metric_source": {
       "description": "Where the metric files come from: the repository at base_commit, or the run request.",
       "enum": ["repository", "request"]
+    },
+    "metric_setup": {
+      "description": "The [metric] setup command of the contract. Present only when the contract sets one.",
+      "type": "string",
+      "minLength": 1
     },
     "cases_sha256": {
       "description": "SHA-256 of the cases file bytes, or of the compact sorted-key JSON of the request cases. Null when the run has no cases.",
@@ -82,6 +87,16 @@
       "description": "The container image that the run used.",
       "type": ["string", "null"]
     },
+    "boxes": {
+      "description": "The user box images, one object for each role that sets image or dockerfile. Present exactly in a version 2 record.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "run": {"$ref": "#/$defs/box"},
+        "metric": {"$ref": "#/$defs/box"}
+      }
+    },
     "contract_met": {
       "description": "True when the result meets the contract.",
       "type": "boolean"
@@ -120,6 +135,11 @@
   },
   "allOf": [
     {
+      "if": {"properties": {"record_version": {"const": 2}}, "required": ["record_version"]},
+      "then": {"required": ["boxes"]},
+      "else": {"not": {"required": ["boxes"]}}
+    },
+    {
       "$comment": "No required list in the if: dependentRequired already makes both keys present or both absent.",
       "if": {"properties": {"requirements_passed": {"const": true}}},
       "then": {"properties": {"failed_requirements": {"maxItems": 0}}}
@@ -143,6 +163,39 @@
       "pattern": "^[0-9a-f]{40}$",
       "minLength": 40,
       "maxLength": 40
+    },
+    "image_digest": {
+      "description": "sha256: and 64 lowercase hex characters.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "minLength": 71,
+      "maxLength": 71
+    },
+    "box": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "source", "input_hash", "build_log"],
+      "properties": {
+        "digest": {
+          "description": "The digest of the image that the box used.",
+          "$ref": "#/$defs/image_digest"
+        },
+        "source": {
+          "description": "Where the image comes from: the image key or the dockerfile key of the contract.",
+          "enum": ["image", "dockerfile"]
+        },
+        "input_hash": {
+          "description": "The hash of the build inputs, sha256: and 64 lowercase hex characters. Null for an image source.",
+          "anyOf": [{"$ref": "#/$defs/image_digest"}, {"type": "null"}]
+        },
+        "build_log": {
+          "description": "The reference of the build log, for example image-build:<id>. Null for an image source.",
+          "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]
+        }
+      },
+      "if": {"properties": {"source": {"const": "image"}}, "required": ["source"]},
+      "then": {"properties": {"input_hash": {"type": "null"}, "build_log": {"type": "null"}}},
+      "else": {"properties": {"input_hash": {"type": "string"}, "build_log": {"type": "string"}}}
     },
     "positions": {
       "type": "array",
