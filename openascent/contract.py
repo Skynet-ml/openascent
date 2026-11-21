@@ -176,10 +176,13 @@ _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
 # A box image is pinned by its digest, so the image cannot change under a run (SKY-887). The
 # optional registry host may have a port; no part may have a tag, which would be a second form.
 _IMAGE_PART = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+_HOST_PART = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
 _IMAGE = re.compile(
-    rf"(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*(?::[0-9]{{1,5}})?/)?{_IMAGE_PART}(?:/{_IMAGE_PART})*"
+    rf"(?:{_HOST_PART}(?:\.{_HOST_PART})*(?::[0-9]{{1,5}})?/)?{_IMAGE_PART}(?:/{_IMAGE_PART})*"
     r"@sha256:[0-9a-f]{64}"
 )
+# The Docker reference grammar refuses a name over 255 characters; the digest is not part of it.
+_MAX_IMAGE_NAME = 255
 
 
 @dataclass(frozen=True)
@@ -1339,7 +1342,8 @@ def _image(value: Any, label: str) -> str:
         The reference as written.
 
     Raises:
-        ConstraintsError: When the value is not ``name@sha256:<64 lowercase hex>``.
+        ConstraintsError: When the value is not ``name@sha256:<64 lowercase hex>``,
+            or the name is longer than 255 characters.
     """
     if not isinstance(value, str) or not _IMAGE.fullmatch(value):
         raise ConstraintsError(
@@ -1349,7 +1353,53 @@ def _image(value: Any, label: str) -> str:
             " under a run; pin the digest and remove the tag.",
             **_at(f"{label} image"),
         )
+    if len(value.partition("@")[0]) > _MAX_IMAGE_NAME:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} image has a name longer than {_MAX_IMAGE_NAME}"
+            " characters before '@sha256:'. Docker refuses such a name; use a shorter one.",
+            **_at(f"{label} image"),
+        )
     return value
+
+
+def _automatic_protected(
+    *,
+    rule_files: Iterable[str],
+    mcp_files: Iterable[str],
+    compose_file: str | None,
+    dockerfiles: Iterable[str],
+    protected_paths: Iterable[str],
+    command_files: Iterable[str] = (),
+) -> tuple[str, ...]:
+    """Return every protected path: the files the toml names and the ``[paths] protected`` ones.
+
+    The parse check and :func:`effective_environment` both use this list, so
+    the build-context rule (SKY-887) sees the same protection in both places.
+
+    Args:
+        rule_files: The instructions and rule files.
+        mcp_files: The ``.mcp.json`` files that the roles name.
+        compose_file: The ``[sandbox] compose`` file, or None.
+        dockerfiles: The Dockerfiles that the roles name.
+        protected_paths: The ``[paths] protected`` paths.
+        command_files: The proposer command files, which only a file proposer protects.
+
+    Returns:
+        The distinct paths in a fixed order, starting with the constraints file.
+    """
+    return tuple(
+        dict.fromkeys(
+            (
+                CONSTRAINTS_FILE,
+                *rule_files,
+                *mcp_files,
+                *((compose_file,) if compose_file else ()),
+                *dockerfiles,
+                *protected_paths,
+                *command_files,
+            )
+        )
+    )
 
 
 def _build_context_errors(
@@ -2754,15 +2804,6 @@ def _parse_constraints(
     metric_role = _role(metric_section, "[metric]", declared, problems)
     run_role |= _box_image(run_section, "[run]", problems)
     metric_role |= _box_image(metric_section, "[metric]", problems)
-    # A file that sets no editable paths is checked again with the approved ones.
-    if editable is not None:
-        dockerfiles = {
-            label: role["dockerfile"]
-            for label, role in (("[run]", run_role), ("[metric]", metric_role))
-            if role["dockerfile"] is not None
-        }
-        for label, message in _build_context_errors(dockerfiles, editable, protected):
-            problems.add(message, **_at(f"{label} dockerfile"))
     # A url with an error is None, and an unknown host is no second host for a secret.
     problems.check(
         _check_secret_receivers,
@@ -2795,6 +2836,28 @@ def _parse_constraints(
         (f"[target.{name}] illegal", stage.illegal_file) for name, stage in stages.items()
     ]
     problems.check(_refuse_visible_cases, cases_file, rule_files)
+    # A file that sets no editable paths is checked again with the approved ones.
+    if editable is not None:
+        dockerfiles = {
+            label: role["dockerfile"]
+            for label, role in (("[run]", run_role), ("[metric]", metric_role))
+            if role["dockerfile"] is not None
+        }
+        roles = (proposer, run_role, metric_role)
+        # The proposer command files are known only from the snapshot, so
+        # effective_environment checks them again with those files.
+        all_protected = _automatic_protected(
+            rule_files=(path for _, path in rule_files if path is not None),
+            mcp_files=[
+                *(role["mcp"] for role in roles if role["mcp"] is not None),
+                *(stage.mcp for stage in targets.values() if stage.mcp is not None),
+            ],
+            compose_file=compose_file,
+            dockerfiles=dockerfiles.values(),
+            protected_paths=protected,
+        )
+        for label, message in _build_context_errors(dockerfiles, editable, all_protected):
+            problems.add(message, **_at(f"{label} dockerfile"))
     metric = _metric(metric_section, problems)
     # A rule file that is the cases file already has its error, so the hidden-file rule skips it.
     visible = [
@@ -3820,18 +3883,13 @@ def effective_environment(
     # Only exact argv paths are known here; the docs tell
     # users to protect the files the command imports.
     command_files = constraints.proposer_command_files if use_file_proposer else ()
-    protected = tuple(
-        dict.fromkeys(
-            (
-                CONSTRAINTS_FILE,
-                *constraints.rule_files,
-                *constraints.mcp_files,
-                *((constraints.compose_file,) if constraints.compose_file else ()),
-                *constraints.dockerfiles.values(),
-                *constraints.protected_paths,
-                *command_files,
-            )
-        )
+    protected = _automatic_protected(
+        rule_files=constraints.rule_files,
+        mcp_files=constraints.mcp_files,
+        compose_file=constraints.compose_file,
+        dockerfiles=constraints.dockerfiles.values(),
+        protected_paths=constraints.protected_paths,
+        command_files=command_files,
     )
     # Protected paths win over editable ones when a patch is checked, so this
     # run could only spend its budget on versions that are all refused.

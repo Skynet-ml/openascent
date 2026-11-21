@@ -17,6 +17,7 @@ from .contract import (
     _MAX_COMMAND_CHARS,
     _MAX_COMMAND_PARTS,
     _MAX_HOSTS,
+    _MAX_IMAGE_NAME,
     _MAX_NAMES,
     _MAX_PATHS,
     _MAX_TABLES,
@@ -57,7 +58,10 @@ _VCPUS = {
 _BOX = {
     "image": {
         "type": "string",
-        "pattern": f"^{_IMAGE.pattern}$",
+        # A JSON Schema pattern is a search, and "$" would also match before a final newline.
+        "pattern": f"^{_IMAGE.pattern}$(?![\\s\\S])",
+        # The name, then "@sha256:" and 64 hex characters.
+        "maxLength": _MAX_IMAGE_NAME + len("@sha256:") + 64,
         "description": "The box image, pinned by its digest: name@sha256:<64 lowercase hex>.",
     },
     "dockerfile": {

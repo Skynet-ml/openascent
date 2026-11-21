@@ -58,13 +58,19 @@ def _errors(raw: bytes) -> list[tuple[str | None, str | None, str]]:
     return [(d.section, d.key, d.message) for d in caught.value.errors]
 
 
-def _archive(tmp_path: Path, files: dict[str, bytes], links: dict[str, str] | None = None) -> Path:
-    """Pack files, and optional symbolic links, as a repository snapshot.
+def _archive(
+    tmp_path: Path,
+    files: dict[str, bytes],
+    links: dict[str, str] | None = None,
+    link_type: bytes = tarfile.SYMTYPE,
+) -> Path:
+    """Pack files, and optional links, as a repository snapshot.
 
     Args:
         tmp_path: Scratch folder.
         files: Root-relative path to bytes.
         links: Root-relative link path to its target.
+        link_type: ``tarfile.SYMTYPE`` for symbolic links, ``tarfile.LNKTYPE`` for hard links.
 
     Returns:
         The archive.
@@ -77,7 +83,7 @@ def _archive(tmp_path: Path, files: dict[str, bytes], links: dict[str, str] | No
             packed.addfile(info, io.BytesIO(data))
         for name, target in (links or {}).items():
             info = tarfile.TarInfo(name)
-            info.type, info.linkname = tarfile.SYMTYPE, target
+            info.type, info.linkname = link_type, target
             packed.addfile(info)
     return archive
 
@@ -89,6 +95,8 @@ def _archive(tmp_path: Path, files: dict[str, bytes], links: dict[str, str] | No
         f"library/python@sha256:{_DIGEST}",
         _IMAGE,
         f"registry.example.com:5000/team/my-box_v2@sha256:{_DIGEST}",
+        f"my-registry.example.com/box@sha256:{_DIGEST}",
+        f"{'a' * 255}@sha256:{_DIGEST}",
     ],
 )
 @pytest.mark.parametrize("section", ["run", "metric"])
@@ -154,6 +162,9 @@ def test_a_box_with_both_keys_fails_with_one_error(section: str) -> None:
         f'"Python@sha256:{_DIGEST}"',
         f'" python@sha256:{_DIGEST}"',
         f'"python@sha256:{_DIGEST}\\n"',
+        f'"-registry.example.com/box@sha256:{_DIGEST}"',
+        f'"registry-.example.com/box@sha256:{_DIGEST}"',
+        f'"registry.-example.com/box@sha256:{_DIGEST}"',
         '""',
         "1",
         f'["python@sha256:{_DIGEST}"]',
@@ -171,6 +182,43 @@ def test_an_image_that_is_not_pinned_by_its_digest_fails_with_one_error(
     assert (place, key) == (section, "image")
     assert message.startswith(f"{CONSTRAINTS_FILE}: [{section}] image must be pinned by its digest")
     assert "'name@sha256:<64 lowercase hex characters>'" in message
+
+
+@pytest.mark.parametrize("key", ["image", "dockerfile"])
+@pytest.mark.parametrize(
+    ("section", "body"),
+    [("proposer", ""), ("target.lint", 'entry = "lint.py:main"\n')],
+)
+def test_the_proposer_and_a_target_stage_refuse_both_keys(
+    section: str, body: str, key: str
+) -> None:
+    """Only [run] and [metric] build a box image, so the other roles refuse the keys."""
+    value = _IMAGE if key == "image" else "docker/Dockerfile"
+    raw = _BASE + f'[{section}]\n{body}{key} = "{value}"\n'.encode()
+
+    errors = _errors(raw)
+
+    assert errors == [
+        (section, key, f"{CONSTRAINTS_FILE}: [{section}] {key} is not a supported setting.")
+    ]
+
+
+@pytest.mark.parametrize("name_length", [256, 300])
+@pytest.mark.parametrize("section", ["run", "metric"])
+def test_an_image_name_longer_than_255_characters_fails(section: str, name_length: int) -> None:
+    """Docker refuses a name over 255 characters, so the check refuses it first."""
+    image = f"{'a' * name_length}@sha256:{_DIGEST}"
+
+    errors = _errors(_contract(**{section: f'image = "{image}"'}))
+
+    assert errors == [
+        (
+            section,
+            "image",
+            f"{CONSTRAINTS_FILE}: [{section}] image has a name longer than 255 characters"
+            " before '@sha256:'. Docker refuses such a name; use a shorter one.",
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -276,12 +324,52 @@ def test_an_editable_file_in_the_context_that_is_also_protected_parses() -> None
 
 
 @pytest.mark.parametrize(
+    ("run", "editable"),
+    [
+        ('dockerfile = "docker/Dockerfile"', "docker/Dockerfile"),
+        ('dockerfile = "docker/Dockerfile"\nmcp = "docker/.mcp.json"', "docker/.mcp.json"),
+        ('dockerfile = "docker/Dockerfile"\nillegal = "docker/rules.md"', "docker/rules.md"),
+    ],
+)
+def test_an_editable_file_in_the_context_that_the_toml_protects_passes_both_checks(
+    run: str, editable: str
+) -> None:
+    """The parse check and effective_environment protect the same files the toml names."""
+    constraints = parse_constraints(_contract(run=run, paths=f'editable = ["src", "{editable}"]'))
+
+    environment = effective_environment(
+        constraints, approved_editable=["src", editable], approved_setup=None
+    )
+
+    assert editable in environment.protected_paths
+    assert "docker/Dockerfile" in environment.protected_paths
+
+
+def test_the_environment_accepts_an_approved_editable_file_that_the_toml_protects() -> None:
+    """A contract with no editable paths is checked with the approved ones and the same list."""
+    constraints = parse_constraints(
+        _contract(run='dockerfile = "docker/Dockerfile"\nmcp = "docker/.mcp.json"', paths="")
+    )
+
+    for approved in (["src", "docker/Dockerfile"], ["src", "docker/.mcp.json"]):
+        environment = effective_environment(
+            constraints, approved_editable=approved, approved_setup=None
+        )
+        assert environment.editable_paths == tuple(approved)
+    with pytest.raises(ConstraintsError, match="the editable path 'docker' overlaps it"):
+        effective_environment(constraints, approved_editable=["docker"], approved_setup=None)
+
+
+@pytest.mark.parametrize(
     ("metric", "dockerfile", "hidden"),
     [
         ('files = ["eval/score.py"]', "eval/Dockerfile", "eval/score.py"),
         ('files = ["eval"]', "eval/box/Dockerfile", "eval"),
         ('reference = "box/ref.txt"', "box/Dockerfile", "box/ref.txt"),
         ('dockerfile = "box/metric.Dockerfile"', "box/Dockerfile", "box/metric.Dockerfile"),
+        ('illegal = "eval/rules.md"', "eval/Dockerfile", "eval/rules.md"),
+        ('mcp = "eval/.mcp.json"', "eval/Dockerfile", "eval/.mcp.json"),
+        ('[data]\ncases = "eval/cases.jsonl"', "eval/Dockerfile", "eval/cases.jsonl"),
     ],
 )
 def test_a_run_build_context_that_overlaps_a_hidden_path_fails_the_check(
@@ -303,6 +391,20 @@ def test_a_run_build_context_that_overlaps_a_hidden_path_fails_the_check(
             " in a folder apart from the [metric] and [data] files.",
         )
     ]
+
+
+def test_a_run_build_context_may_hold_an_mcp_file_that_both_boxes_share() -> None:
+    """An MCP file that [run] names too is visible to the candidate, so it is not hidden."""
+    constraints = parse_constraints(
+        _contract(
+            run='dockerfile = "eval/Dockerfile"\nmcp = "eval/.mcp.json"',
+            metric='mcp = "eval/.mcp.json"',
+        )
+    )
+
+    effective_environment(constraints, approved_editable=["src"], approved_setup=None)
+
+    assert "eval/.mcp.json" not in scorer_only_paths(constraints)
 
 
 def test_the_environment_refuses_a_run_build_context_that_overlaps_a_hidden_path() -> None:
@@ -387,14 +489,21 @@ def test_read_constraints_checks_that_the_dockerfile_is_a_regular_file(tmp_path:
     assert constraints.dockerfiles == {"[run]": "docker/Dockerfile", "[metric]": "m/Dockerfile"}
 
 
+@pytest.mark.parametrize(
+    ("link_type", "target"),
+    [(tarfile.SYMTYPE, "../../eval/score.py"), (tarfile.LNKTYPE, "eval/score.py")],
+)
 @pytest.mark.parametrize("link", ["docker/data", "docker/deep/inner/data"])
-def test_a_link_anywhere_in_the_build_context_is_refused(tmp_path: Path, link: str) -> None:
-    """A link in the context could pull a file from outside the folder into the build."""
+def test_a_link_anywhere_in_the_build_context_is_refused(
+    tmp_path: Path, link: str, link_type: bytes, target: str
+) -> None:
+    """A symbolic or hard link in the context could pull an outside file into the build."""
     raw = _contract(run='dockerfile = "docker/Dockerfile"')
     files = {CONSTRAINTS_FILE: raw, "docker/Dockerfile": b"FROM scratch\n"}
+    files["eval/score.py"] = b"secret = 1\n"
 
     with pytest.raises(ConstraintsError) as caught:
-        read_constraints(_archive(tmp_path, files, links={link: "../../eval/score.py"}))
+        read_constraints(_archive(tmp_path, files, links={link: target}, link_type=link_type))
 
     assert [(d.section, d.key) for d in caught.value.errors] == [("run", "dockerfile")]
     assert f"its build context 'docker' holds the link '{link}'" in caught.value.errors[0].message
@@ -425,4 +534,13 @@ def test_the_schema_describes_both_keys_and_refuses_both_together() -> None:
         )
         both = {"image": _IMAGE, "dockerfile": "d/Dockerfile"}
         assert not validator.is_valid({**base, section: {**base.get(section, {}), **both}})
-    assert not validator.is_valid({**base, "run": {**base["run"], "image": "python:3.12"}})
+    for image in (
+        "python:3.12",
+        f"{_IMAGE}\n",
+        f"registry-.example.com/box@sha256:{_DIGEST}",
+        f"{'a' * 256}@sha256:{_DIGEST}",
+    ):
+        assert not validator.is_valid({**base, "run": {**base["run"], "image": image}})
+    assert validator.is_valid(
+        {**base, "run": {**base["run"], "image": f"{'a' * 255}@sha256:{_DIGEST}"}}
+    )
