@@ -537,6 +537,30 @@ def test_metric_parts_form():
     assert _metric_parts(METRIC_FILES).startswith(first + b"metric.py\x00")
 
 
+def test_metric_hash_with_the_fixed_parts():
+    """The setup and image parts of the README give the metric hash that Skynet writes."""
+    files = {
+        "metric.py": b'def score(output, expected=None):\n    return {"score": 1.0}\n',
+        "eval/util.py": b"X = 1\n",
+    }
+    setup = b"pip install -r requirements.txt"
+    digest = ("sha256:" + "5" * 64).encode("utf-8")
+    parts = {path.encode("utf-8"): data for path, data in files.items()}
+    parts[b"/[metric] setup"] = setup
+    parts[b"/[metric] image"] = digest
+    order = sorted(parts)
+    assert order == [b"/[metric] image", b"/[metric] setup", b"eval/util.py", b"metric.py"]
+    assert len(digest) == 71
+    joined = b"".join(
+        path + b"\0" + str(len(parts[path])).encode() + b"\0" + _sha256(parts[path]).encode()
+        for path in order
+    )
+    # From Skynet's _record_facts (backend/core/worker/repo_staging.py, SKY-737 branch) on an
+    # archive of these two files, with [metric] files ("metric.py", "eval"), a command entry,
+    # this setup and this metric image.
+    assert _sha256(joined) == "3df81e908e2bd16c0a49afde7e4a8158e7b47492401bb9aadedc8d9ec1814751"
+
+
 @pytest.mark.parametrize(
     ("name", "data"),
     [("ascent.toml", CONTRACT), ("change.patch", PATCH.encode("utf-8")), ("cases.jsonl", b"")],
