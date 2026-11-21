@@ -40,7 +40,7 @@ from .result import (
 )
 from .schema import contract_schema
 
-__version__ = "0.4.4"
+__version__ = "0.4.5"
 
 __all__ = [
     "CONSTRAINTS_FILE",
