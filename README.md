@@ -217,7 +217,7 @@ The contract file is `ascent.toml`. The next section tells how the package reads
 The module `openascent.contract` reads and checks `ascent.toml`. It uses only the Python standard library.
 
 - `parse_constraints(raw)` reads the bytes of the file and returns the checked contract, a `RepoConstraints`.
-- `read_constraints(archive)` reads the file from a repository archive (a gzip tar file). It also checks the files that the contract names: the instructions and rule files, the `.mcp.json` files and the `[data] cases` file.
+- `read_constraints(archive)` reads the file from a repository archive (a gzip tar file). It also checks the files that the contract names: the instructions and rule files, the `.mcp.json` files, the `[data] cases` file and the Dockerfiles.
 - An invalid file raises `ConstraintsError`. One check finds every mistake in the file. `error.errors` holds them all, in a fixed order, as `Diagnostic` values.
 - Each `Diagnostic` has a `level` (`"error"` or `"warning"`), a `file`, a `line`, a `section`, a `key` and a `message`. The message says what is wrong and how to fix it.
 - `line` is the line of the key. When the key is not in the file, it is the line of the section header. When the section is not in the file either, it is `None`.
@@ -256,6 +256,31 @@ contract = parse_constraints(raw, limits=RunnerLimits(max_vcpus=8, max_timeout=6
 The package does not read the Compose file that `[sandbox] compose` names. The Compose format belongs to the runner.
 The parser checks only the path. To read the file, give `read_constraints` a `compose_parser`: a function that gets the text of the file and returns the services.
 It raises `ValueError` to refuse the file, and the package turns that into a `ConstraintsError`. With no `compose_parser`, `compose_services` stays empty.
+
+### The box image: `image` or `dockerfile`
+
+`[run]` and `[metric]` can each name the image of their box. The candidate box runs `[run]`, and the metric box runs `[metric]`.
+A box sets one of two keys, or neither. A box that sets both fails with one error.
+
+```toml
+[run]
+entry = "run.py:main"
+image = "ghcr.io/acme/box@sha256:<64 lowercase hex characters>"
+
+[metric]
+dockerfile = "docker/metric/Dockerfile"
+```
+
+- `image` must be pinned by its digest: `name@sha256:<64 lowercase hex characters>`. The name can start with a registry host and a port. Each part of the host starts and ends with a letter or a digit. The name before `@sha256:` can have at most 255 characters. A tag, such as `python:3.12`, can change under a run, so it fails. A tag with a digest fails too: write the digest only.
+- `dockerfile` is the repository path of one file. It gets the same path checks as the other keys that name one file. `read_constraints` also checks that the snapshot holds it as a regular file, not a link or a folder.
+- The package does not read the Dockerfile, so it does not check its `FROM` line. Pin each `FROM` image by its digest, for example `FROM python@sha256:<digest>`, so that the build gives the same image every time.
+- The Dockerfile is always a protected path, so a version cannot change it.
+- The build context is the folder of the Dockerfile. No editable path can overlap that folder, so a version cannot change what the image builds from. A protected path that covers the overlap is allowed. This includes the paths that the contract protects automatically: `ascent.toml`, the instructions and rule files, the `mcp` files, the Compose file and the Dockerfiles. The check runs on `[paths] editable` in the file, and again on the editable paths of the run. A Dockerfile at the root of the repository has the whole repository as its context, so put it in its own folder.
+- The `[run]` build context cannot overlap a path that only the scorer reads: the `[metric]` files, exploit folder, reference, rule file, `mcp` file and Dockerfile, and the `[data] cases` file. Otherwise the candidate image could copy the hidden scorer. The `[metric]` build context can hold them.
+- `read_constraints` refuses a symbolic link or a hard link anywhere in a build context folder, because a link could pull a file from outside the folder into the build.
+- The `[metric]` Dockerfile is a scorer-only path, so `scorer_only_paths` lists it. When `[run]` names the same Dockerfile, it stays visible.
+- `RoleEnvironment.image` and `RoleEnvironment.dockerfile` hold the values for `run_role` and `metric_role`. Each is `None` when the key is not set, and the runner then uses its own image. `RepoConstraints.dockerfiles` maps `[run]` and `[metric]` to their Dockerfile paths.
+- A contract that sets neither key parses exactly as before.
 
 ### The `ascent check <file>` command
 

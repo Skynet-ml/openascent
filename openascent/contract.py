@@ -12,9 +12,9 @@ secret value; asking for either fails with the reason.
 :func:`parse_constraints` checks the bytes of the file: every section, key
 and value, and the rules across sections. :func:`read_constraints` reads the
 file from a repository archive and also checks the files it names: the
-instructions and rule files, the ``.mcp.json`` files and the ``[data] cases``
-file. Every file it names is protected like ``ascent.toml`` itself, so no
-version can rewrite its own rules.
+instructions and rule files, the ``.mcp.json`` files, the ``[data] cases``
+file and the ``[run]`` and ``[metric]`` Dockerfiles. Every file it names is
+protected like ``ascent.toml`` itself, so no version can rewrite its own rules.
 
 Two things belong to the runner, not to this package:
 
@@ -116,9 +116,24 @@ _SECTIONS: dict[str, frozenset[str]] = {
             "illegal",
             "vcpus",
             "scores",
+            "image",
+            "dockerfile",
         }
     ),
-    "run": frozenset({"entry", "timeout", "mcp", "network", "services", "illegal", "vcpus"}),
+    # image or dockerfile names the box image of the candidate or the metric (SKY-887).
+    "run": frozenset(
+        {
+            "entry",
+            "timeout",
+            "mcp",
+            "network",
+            "services",
+            "illegal",
+            "vcpus",
+            "image",
+            "dockerfile",
+        }
+    ),
     "data": frozenset({"cases"}),
     # Compose services run beside the scorer; [services.<name>] stays the API relay.
     "sandbox": frozenset({"compose"}),
@@ -158,6 +173,16 @@ _SECRET_PREFIX = re.compile(
 _SECRET_TOKEN = re.compile(r"[A-Za-z0-9_\-+/.~]{24,}")
 # Some providers issue UUID keys, which the dashed-slug rule below would let through.
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+# A box image is pinned by its digest, so the image cannot change under a run (SKY-887). The
+# optional registry host may have a port; no part may have a tag, which would be a second form.
+_IMAGE_PART = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+_HOST_PART = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+_IMAGE = re.compile(
+    rf"(?:{_HOST_PART}(?:\.{_HOST_PART})*(?::[0-9]{{1,5}})?/)?{_IMAGE_PART}(?:/{_IMAGE_PART})*"
+    r"@sha256:[0-9a-f]{64}"
+)
+# The Docker reference grammar refuses a name over 255 characters; the digest is not part of it.
+_MAX_IMAGE_NAME = 255
 
 
 @dataclass(frozen=True)
@@ -607,6 +632,11 @@ class RoleEnvironment:
     illegal_file: str | None = None
     # The servers of the mcp file; read_constraints fills them from the same snapshot (E49).
     mcp_servers: tuple[McpServer, ...] = ()
+    # Only [run] and [metric] set one of these two (SKY-887); [proposer] and [target.<name>]
+    # refuse both keys, so they stay None there. None keeps the runner's own image.
+    # image is "name@sha256:<digest>"; dockerfile is a repository path, built in its own folder.
+    image: str | None = None
+    dockerfile: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -741,6 +771,12 @@ class RepoConstraints:
         return tuple(
             dict.fromkeys(role.mcp for role in self.mcp_roles.values() if role.mcp is not None)
         )
+
+    @property
+    def dockerfiles(self) -> dict[str, str]:
+        """Return the repository path of each role's Dockerfile, by the label the file uses."""
+        roles = {"[run]": self.run_role, "[metric]": self.metric_role}
+        return {label: role.dockerfile for label, role in roles.items() if role.dockerfile}
 
     @property
     def mcp_roles(self) -> dict[str, RoleEnvironment]:
@@ -1266,6 +1302,171 @@ def _role(
         "services": tuple(name for name in named if declared is not None and name in declared),
         "illegal_file": problems.check(_illegal_file, section, label),
     }
+
+
+def _box_image(section: Mapping[str, Any], label: str, problems: _Problems) -> dict[str, Any]:
+    """Read the optional ``image`` or ``dockerfile`` of the ``[run]`` or ``[metric]`` box (SKY-887).
+
+    Args:
+        section: The parsed ``[run]`` or ``[metric]`` table.
+        label: The table as the file names it, used in errors.
+        problems: Records each error.
+
+    Returns:
+        The ``image`` and ``dockerfile`` keyword arguments of :class:`RoleEnvironment`;
+        each is ``None`` when it is absent or has an error.
+    """
+    if "image" in section and "dockerfile" in section:
+        problems.add(
+            f"{CONSTRAINTS_FILE}: {label} sets both image and dockerfile. Set one: image for a"
+            " pinned image, or dockerfile to build the image from the repository.",
+            **_at(f"{label} dockerfile"),
+        )
+    image = problems.check(_image, section["image"], label) if "image" in section else None
+    dockerfile = (
+        problems.check(_one_file, section["dockerfile"], f"{label} dockerfile")
+        if "dockerfile" in section
+        else None
+    )
+    return {"image": image, "dockerfile": dockerfile}
+
+
+def _image(value: Any, label: str) -> str:
+    """Check one ``image`` value: a reference pinned by its digest.
+
+    Args:
+        value: The ``image`` value as parsed.
+        label: The table as the file names it, used in errors.
+
+    Returns:
+        The reference as written.
+
+    Raises:
+        ConstraintsError: When the value is not ``name@sha256:<64 lowercase hex>``,
+            or the name is longer than 255 characters.
+    """
+    if not isinstance(value, str) or not _IMAGE.fullmatch(value):
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} image must be pinned by its digest, written"
+            " 'name@sha256:<64 lowercase hex characters>', such as"
+            f" 'ghcr.io/acme/box@sha256:{'0' * 64}'. A tag such as 'python:3.12' can change"
+            " under a run; pin the digest and remove the tag.",
+            **_at(f"{label} image"),
+        )
+    if len(value.partition("@")[0]) > _MAX_IMAGE_NAME:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} image has a name longer than {_MAX_IMAGE_NAME}"
+            " characters before '@sha256:'. Docker refuses such a name; use a shorter one.",
+            **_at(f"{label} image"),
+        )
+    return value
+
+
+def _automatic_protected(
+    *,
+    rule_files: Iterable[str],
+    mcp_files: Iterable[str],
+    compose_file: str | None,
+    dockerfiles: Iterable[str],
+    protected_paths: Iterable[str],
+    command_files: Iterable[str] = (),
+) -> tuple[str, ...]:
+    """Return every protected path: the files the toml names and the ``[paths] protected`` ones.
+
+    The parse check and :func:`effective_environment` both use this list, so
+    the build-context rule (SKY-887) sees the same protection in both places.
+
+    Args:
+        rule_files: The instructions and rule files.
+        mcp_files: The ``.mcp.json`` files that the roles name.
+        compose_file: The ``[sandbox] compose`` file, or None.
+        dockerfiles: The Dockerfiles that the roles name.
+        protected_paths: The ``[paths] protected`` paths.
+        command_files: The proposer command files, which only a file proposer protects.
+
+    Returns:
+        The distinct paths in a fixed order, starting with the constraints file.
+    """
+    return tuple(
+        dict.fromkeys(
+            (
+                CONSTRAINTS_FILE,
+                *rule_files,
+                *mcp_files,
+                *((compose_file,) if compose_file else ()),
+                *dockerfiles,
+                *protected_paths,
+                *command_files,
+            )
+        )
+    )
+
+
+def _build_context_errors(
+    dockerfiles: Mapping[str, str], editable: Sequence[str], protected: Sequence[str]
+) -> list[tuple[str, str]]:
+    """Find each Dockerfile whose build context holds a path that a version can edit (SKY-887).
+
+    The build context is the Dockerfile's folder. A version must not change what
+    the image builds from, so no editable path may overlap that folder, unless a
+    protected path covers the overlap.
+
+    Args:
+        dockerfiles: The repository path of each Dockerfile, by the label of its role.
+        editable: The editable paths.
+        protected: The protected paths, which win over editable ones.
+
+    Returns:
+        ``(label, message)`` for each Dockerfile that breaks the rule.
+    """
+    errors = []
+    for label, path in dockerfiles.items():
+        context = posixpath.dirname(path) or "."
+        open_paths = [
+            edit
+            for edit in editable
+            if (_inside(edit, (context,)) or _inside(context, (edit,)))
+            and not _inside(edit, protected)
+            and not _inside(context, protected)
+        ]
+        if open_paths:
+            errors.append(
+                (
+                    label,
+                    f"{CONSTRAINTS_FILE}: {label} dockerfile names '{path}', so the build context"
+                    f" is the folder '{context}', and the editable path '{open_paths[0]}' overlaps"
+                    " it. A version could change what the image builds from. Put the Dockerfile"
+                    " in a folder that holds no editable path, or protect that folder.",
+                )
+            )
+    return errors
+
+
+def _hidden_context_error(dockerfile: str, hidden: Iterable[str]) -> str | None:
+    """Explain why a ``[run]`` Dockerfile's build context must not overlap a hidden path.
+
+    The image build can copy any file of its context into the candidate box, so a
+    context that overlaps a scorer-only path would show the hidden scorer to a version.
+
+    Args:
+        dockerfile: The repository path of the ``[run]`` Dockerfile.
+        hidden: The scorer-only paths, without ``ascent.toml``.
+
+    Returns:
+        The error message, or ``None`` when the context overlaps no hidden path.
+    """
+    context = posixpath.dirname(dockerfile) or "."
+    overlap = next(
+        (path for path in hidden if _inside(path, (context,)) or _inside(context, (path,))), None
+    )
+    if overlap is None:
+        return None
+    return (
+        f"{CONSTRAINTS_FILE}: [run] dockerfile names '{dockerfile}', so the build context is the"
+        f" folder '{context}', and it overlaps '{overlap}', which only the scorer may read. The"
+        " image could copy the hidden scorer into the candidate box. Put the Dockerfile in a"
+        " folder apart from the [metric] and [data] files."
+    )
 
 
 def _vcpus(value: Any, label: str, section: str, limits: RunnerLimits) -> int:
@@ -2601,6 +2802,8 @@ def _parse_constraints(
     run_role = _role(run_section, "[run]", declared, problems)
     metric_section = document.get("metric", {})
     metric_role = _role(metric_section, "[metric]", declared, problems)
+    run_role |= _box_image(run_section, "[run]", problems)
+    metric_role |= _box_image(metric_section, "[metric]", problems)
     # A url with an error is None, and an unknown host is no second host for a secret.
     problems.check(
         _check_secret_receivers,
@@ -2633,6 +2836,28 @@ def _parse_constraints(
         (f"[target.{name}] illegal", stage.illegal_file) for name, stage in stages.items()
     ]
     problems.check(_refuse_visible_cases, cases_file, rule_files)
+    # A file that sets no editable paths is checked again with the approved ones.
+    if editable is not None:
+        dockerfiles = {
+            label: role["dockerfile"]
+            for label, role in (("[run]", run_role), ("[metric]", metric_role))
+            if role["dockerfile"] is not None
+        }
+        roles = (proposer, run_role, metric_role)
+        # The proposer command files are known only from the snapshot, so
+        # effective_environment checks them again with those files.
+        all_protected = _automatic_protected(
+            rule_files=(path for _, path in rule_files if path is not None),
+            mcp_files=[
+                *(role["mcp"] for role in roles if role["mcp"] is not None),
+                *(stage.mcp for stage in targets.values() if stage.mcp is not None),
+            ],
+            compose_file=compose_file,
+            dockerfiles=dockerfiles.values(),
+            protected_paths=protected,
+        )
+        for label, message in _build_context_errors(dockerfiles, editable, all_protected):
+            problems.add(message, **_at(f"{label} dockerfile"))
     metric = _metric(metric_section, problems)
     # A rule file that is the cases file already has its error, so the hidden-file rule skips it.
     visible = [
@@ -2662,6 +2887,20 @@ def _parse_constraints(
         run_entry,
         [path for path in metric_only if path is not None],
     )
+    if run_role["dockerfile"] is not None:
+        metric_dockerfile = metric_role["dockerfile"]
+        hidden_paths = [
+            *scoring,
+            *(path for path in metric_only if path is not None),
+            *(
+                (metric_dockerfile,)
+                if metric_dockerfile not in (None, run_role["dockerfile"])
+                else ()
+            ),
+        ]
+        message = _hidden_context_error(run_role["dockerfile"], hidden_paths)
+        if message is not None:
+            problems.add(message, section="run", key="dockerfile")
     run_vcpus = (
         problems.check(_vcpus, run_section["vcpus"], "[run]", "run", limits)
         if "vcpus" in run_section
@@ -2822,8 +3061,61 @@ def _read_constraints(
             _load_compose, constraints, archive, compose_parser, default=constraints
         )
     constraints = problems.check(_load_command_files, constraints, archive, default=constraints)
+    problems.check(_check_dockerfiles, constraints, archive)
     problems.raise_any(raw.decode("utf-8"))
     return constraints
+
+
+def _check_dockerfiles(constraints: RepoConstraints, archive: Path) -> None:
+    """Check that each Dockerfile that ``[run]`` or ``[metric]`` names is a file of the snapshot.
+
+    Args:
+        constraints: The parsed proposal.
+        archive: The repository tree as a gzip tar archive, the same snapshot the toml came from.
+
+    Raises:
+        ConstraintsError: With one error for each Dockerfile that is missing, or is a link or
+            folder, which protection by path would not cover, and one for each build context
+            folder that holds a link at any depth.
+    """
+    if not constraints.dockerfiles:
+        return
+    with tarfile.open(archive, "r:gz") as packed:
+        members = {str(PurePosixPath(m.name)): m for m in packed.getmembers()}
+    problems = _Problems()
+    for label, path in constraints.dockerfiles.items():
+        setting = f"{label} dockerfile"
+        context = posixpath.dirname(path) or "."
+        # Protection matches paths, so a link in the context could pull any file into the build.
+        link = next(
+            (
+                name
+                for name, entry in sorted(members.items())
+                if (entry.issym() or entry.islnk()) and _inside(name, (context,))
+            ),
+            None,
+        )
+        if link is not None:
+            problems.add(
+                f"{CONSTRAINTS_FILE}: {setting} names '{path}', and its build context '{context}'"
+                f" holds the link '{link}'. Remove the link from the folder, so that the build"
+                " reads only the files of the folder.",
+                **_at(setting),
+            )
+        member = members.get(path)
+        if member is None:
+            problems.add(
+                f"{CONSTRAINTS_FILE}: {setting} names '{path}', but the repository has no such"
+                " file.",
+                **_at(setting),
+            )
+        elif not member.isfile():
+            problems.add(
+                f"{CONSTRAINTS_FILE}: {setting} names '{path}', which must be a regular file, not"
+                " a link or folder.",
+                **_at(setting),
+            )
+    problems.raise_any()
 
 
 def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
@@ -3499,8 +3791,8 @@ def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
 
     Returns:
         ``ascent.toml``, the ``[metric]`` files, exploit folder, reference,
-        rule file and ``mcp`` file, and the ``[data] cases`` file, without
-        the keys the file does not set.
+        rule file, ``mcp`` file and Dockerfile, and the ``[data] cases`` file,
+        without the keys the file does not set.
     """
     metric = constraints.metric
     hidden = (
@@ -3510,6 +3802,7 @@ def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
         constraints.cases_file,
         constraints.metric_role.illegal_file,
         constraints.metric_role.mcp,
+        constraints.metric_role.dockerfile,
     )
     visible = {
         constraints.instructions_file,
@@ -3517,6 +3810,7 @@ def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
         constraints.proposer.mcp,
         constraints.run_role.illegal_file,
         constraints.run_role.mcp,
+        constraints.run_role.dockerfile,
         *(stage.illegal_file for stage in constraints.targets.values()),
         *(stage.mcp for stage in constraints.targets.values()),
     }
@@ -3533,9 +3827,9 @@ def effective_environment(
 ) -> RepoEnvironment:
     """Combine the customer's approved settings with what the repository proposes.
 
-    The constraints file and every instructions, rule, MCP or Compose file it
-    names are always protected, so no version can change the rules it is scored
-    under or the services beside the scorer.
+    The constraints file and every instructions, rule, MCP, Compose or Dockerfile
+    it names are always protected, so no version can change the rules it is scored
+    under, the services beside the scorer or the image of a box.
 
     Args:
         constraints: The repository's proposal, or ``None`` when it has none.
@@ -3550,7 +3844,10 @@ def effective_environment(
     Raises:
         ConstraintsError: When the file proposes an editable path outside the approved ones,
             an editable path lies inside a path from ``scorer_only_paths``, or the protected paths
-            (always including the file itself) cover every editable path.
+            (always including the file itself) cover every editable path, or an editable path
+            that no protected path covers overlaps the folder of a ``[run]`` or ``[metric]``
+            Dockerfile, which is the build context, or the ``[run]`` build context overlaps a
+            path from ``scorer_only_paths`` other than ``ascent.toml``.
     """
     if constraints is None:
         editable = tuple(approved_editable)
@@ -3586,17 +3883,13 @@ def effective_environment(
     # Only exact argv paths are known here; the docs tell
     # users to protect the files the command imports.
     command_files = constraints.proposer_command_files if use_file_proposer else ()
-    protected = tuple(
-        dict.fromkeys(
-            (
-                CONSTRAINTS_FILE,
-                *constraints.rule_files,
-                *constraints.mcp_files,
-                *((constraints.compose_file,) if constraints.compose_file else ()),
-                *constraints.protected_paths,
-                *command_files,
-            )
-        )
+    protected = _automatic_protected(
+        rule_files=constraints.rule_files,
+        mcp_files=constraints.mcp_files,
+        compose_file=constraints.compose_file,
+        dockerfiles=constraints.dockerfiles.values(),
+        protected_paths=constraints.protected_paths,
+        command_files=command_files,
     )
     # Protected paths win over editable ones when a patch is checked, so this
     # run could only spend its budget on versions that are all refused.
@@ -3618,9 +3911,31 @@ def effective_environment(
             section="paths",
             key="protected",
         )
+    # The parse check cannot see the proposer command files, so this check
+    # leaves them out too; both entry points then give the same verdict.
+    context_errors = _build_context_errors(
+        constraints.dockerfiles,
+        editable,
+        _automatic_protected(
+            rule_files=constraints.rule_files,
+            mcp_files=constraints.mcp_files,
+            compose_file=constraints.compose_file,
+            dockerfiles=constraints.dockerfiles.values(),
+            protected_paths=constraints.protected_paths,
+        ),
+    )
+    if context_errors:
+        label, message = context_errors[0]
+        raise ConstraintsError(message, **_at(f"{label} dockerfile"))
     # The brief names every editable path, so one inside
     # a scorer-only path would name a hidden path.
     hidden = scorer_only_paths(constraints)
+    if constraints.run_role.dockerfile is not None:
+        message = _hidden_context_error(
+            constraints.run_role.dockerfile, [path for path in hidden if path != CONSTRAINTS_FILE]
+        )
+        if message is not None:
+            raise ConstraintsError(message, section="run", key="dockerfile")
     hidden_editable = [path for path in editable if _inside(path, hidden)]
     if hidden_editable:
         raise ConstraintsError(

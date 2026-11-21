@@ -13,9 +13,11 @@ from typing import Any
 
 from .contract import (
     _CONTROL_CHARS,
+    _IMAGE,
     _MAX_COMMAND_CHARS,
     _MAX_COMMAND_PARTS,
     _MAX_HOSTS,
+    _MAX_IMAGE_NAME,
     _MAX_NAMES,
     _MAX_PATHS,
     _MAX_TABLES,
@@ -52,6 +54,21 @@ _VCPUS = {
     "anyOf": [{"const": 1}, {"multipleOf": 2}],
     "description": f"1, or an even number from 2 to {_MAX_VCPUS} with the default runner limits.",
 }
+# [run] and [metric] name their box image in one of two ways, never both (SKY-887).
+_BOX = {
+    "image": {
+        "type": "string",
+        # A JSON Schema pattern is a search, and "$" would also match before a final newline.
+        "pattern": f"^{_IMAGE.pattern}$(?![\\s\\S])",
+        # The name, then "@sha256:" and 64 hex characters.
+        "maxLength": _MAX_IMAGE_NAME + len("@sha256:") + 64,
+        "description": "The box image, pinned by its digest: name@sha256:<64 lowercase hex>.",
+    },
+    "dockerfile": {
+        **_PATH,
+        "description": "The path of a Dockerfile; its folder is the build context.",
+    },
+}
 _ROLE = {
     "mcp": {**_PATH, "description": "The path of the role's .mcp.json file."},
     "network": {
@@ -87,8 +104,9 @@ _KEYS: dict[str, dict[str, Any]] = {
         "setup": {"type": "string"},
         "vcpus": _VCPUS,
         "scores": {**_SCORES, "additionalProperties": {"enum": list(DIRECTIONS)}},
+        **_BOX,
     },
-    "run": {**_ROLE, "entry": _ENTRY, "timeout": _TIMEOUT, "vcpus": _VCPUS},
+    "run": {**_ROLE, "entry": _ENTRY, "timeout": _TIMEOUT, "vcpus": _VCPUS, **_BOX},
     "data": {"cases": {**_PATH, "description": "The path of a JSONL file of cases."}},
     "sandbox": {"compose": {**_PATH, "description": "The path of a Compose file."}},
     "outcome": {
@@ -140,6 +158,8 @@ def contract_schema() -> dict[str, Any]:
         The schema, draft 2020-12.
     """
     sections = {name: _table(keys, _REQUIRED.get(name)) for name, keys in _KEYS.items()}
+    for name in ("run", "metric"):
+        sections[name]["not"] = {"required": ["image", "dockerfile"]}
     target = {**_ROLE, "entry": _ENTRY, "vcpus": _VCPUS, "timeout": _TIMEOUT}
     service = {"url": {"type": "string"}, "headers": _HEADERS, "query": _HEADERS}
     return {
