@@ -360,6 +360,35 @@ def test_the_environment_accepts_an_approved_editable_file_that_the_toml_protect
         effective_environment(constraints, approved_editable=["docker"], approved_setup=None)
 
 
+def test_a_proposer_command_file_in_the_context_gets_the_same_verdict_in_both_checks(
+    tmp_path: Path,
+) -> None:
+    """The context rule ignores the proposer command files, which the parser cannot see."""
+    proposer = '[proposer]\nentry = ["bash", "box/run.sh"]\n'
+    run = 'dockerfile = "box/Dockerfile"'
+    with_editable = _contract(run=run, paths='editable = ["box/run.sh", "src"]') + proposer.encode()
+    without_editable = _contract(run=run, paths="") + proposer.encode()
+    files = {"box/Dockerfile": b"FROM scratch\n", "box/run.sh": b"echo\n"}
+
+    with pytest.raises(ConstraintsError, match="the editable path 'box/run.sh' overlaps it"):
+        parse_constraints(with_editable)
+    constraints = read_constraints(
+        _archive(tmp_path, {CONSTRAINTS_FILE: without_editable, **files})
+    )
+    assert constraints is not None
+    assert constraints.proposer_command_files == ("box/run.sh",)
+    with pytest.raises(
+        ConstraintsError, match="the editable path 'box/run.sh' overlaps it"
+    ) as caught:
+        effective_environment(
+            constraints, approved_editable=["box/run.sh", "src"], approved_setup=None
+        )
+    assert (caught.value.section, caught.value.key) == ("run", "dockerfile")
+
+    environment = effective_environment(constraints, approved_editable=["src"], approved_setup=None)
+    assert "box/run.sh" in environment.protected_paths
+
+
 @pytest.mark.parametrize(
     ("metric", "dockerfile", "hidden"),
     [

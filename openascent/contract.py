@@ -3911,7 +3911,19 @@ def effective_environment(
             section="paths",
             key="protected",
         )
-    context_errors = _build_context_errors(constraints.dockerfiles, editable, protected)
+    # The parse check cannot see the proposer command files, so this check
+    # leaves them out too; both entry points then give the same verdict.
+    context_errors = _build_context_errors(
+        constraints.dockerfiles,
+        editable,
+        _automatic_protected(
+            rule_files=constraints.rule_files,
+            mcp_files=constraints.mcp_files,
+            compose_file=constraints.compose_file,
+            dockerfiles=constraints.dockerfiles.values(),
+            protected_paths=constraints.protected_paths,
+        ),
+    )
     if context_errors:
         label, message = context_errors[0]
         raise ConstraintsError(message, **_at(f"{label} dockerfile"))
