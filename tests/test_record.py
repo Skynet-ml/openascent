@@ -67,10 +67,24 @@ FULL_RECORD = {
     ],
 }
 
+BOX_RUN = {
+    "digest": "sha256:" + "6" * 64,
+    "source": "dockerfile",
+    "input_hash": "sha256:" + "7" * 64,
+    "build_log": "image-build:42",
+}
+BOX_METRIC = {
+    "digest": "sha256:" + "5" * 64,
+    "source": "image",
+    "input_hash": None,
+    "build_log": None,
+}
+
 REQUIRED = sorted(SCHEMA["required"])
 # Not read from the schema: an empty required list in the schema must not empty these tests.
 SPLIT_REQUIRED = sorted(FULL_RECORD["split"])
 FAILED_REQUIRED = sorted(FULL_RECORD["failed_requirements"][0])
+BOX_REQUIRED = sorted(BOX_RUN)
 
 
 def _record(**changes):
@@ -115,6 +129,34 @@ def _failed(**changes):
     return entry
 
 
+def _v2(**boxes):
+    """Return a version 2 copy of the full record with some boxes.
+
+    Args:
+        **boxes: The box of each role. With no box, both roles get a box.
+
+    Returns:
+        The version 2 record.
+    """
+    if not boxes:
+        boxes = {"run": BOX_RUN, "metric": BOX_METRIC}
+    return _record(record_version=2, boxes=copy.deepcopy(boxes))
+
+
+def _box(**changes):
+    """Return a copy of the run box with some keys changed.
+
+    Args:
+        **changes: Keys to set in the box copy.
+
+    Returns:
+        The changed box copy.
+    """
+    box = copy.deepcopy(BOX_RUN)
+    box.update(changes)
+    return box
+
+
 def test_schema_is_valid_draft_2020_12():
     """The schema is valid against the draft 2020-12 meta-schema."""
     Draft202012Validator.check_schema(SCHEMA)
@@ -122,14 +164,21 @@ def test_schema_is_valid_draft_2020_12():
 
 
 def test_every_object_is_closed():
-    """The record, the split and each failed requirement reject unknown keys."""
-    objects = [SCHEMA, SCHEMA["$defs"]["split"], SCHEMA["$defs"]["failed_requirement"]]
+    """The record, the split, each failed requirement, the boxes and a box reject unknown keys."""
+    objects = [
+        SCHEMA,
+        SCHEMA["$defs"]["split"],
+        SCHEMA["$defs"]["failed_requirement"],
+        SCHEMA["properties"]["boxes"],
+        SCHEMA["$defs"]["box"],
+    ]
     assert all(obj["additionalProperties"] is False for obj in objects)
 
 
 def test_required_keys_are_the_version_1_keys():
-    """Every key is required except the three verdict keys."""
+    """Every key is required except the three verdict keys and the version 2 boxes key."""
     assert set(SCHEMA["required"]) == set(SCHEMA["properties"]) - {
+        "boxes",
         "target_reached",
         "requirements_passed",
         "failed_requirements",
@@ -145,6 +194,33 @@ def test_skynet_record_is_valid():
     """A record from a Skynet test is valid."""
     record = json.loads((FIXTURES / "skynet_record.json").read_text(encoding="utf-8"))
     VALIDATOR.validate(record)
+
+
+def test_skynet_record_v2_is_valid():
+    """A version 2 record from a Skynet test, with a box for each role, is valid."""
+    record = json.loads((FIXTURES / "skynet_record_v2.json").read_text(encoding="utf-8"))
+    VALIDATOR.validate(record)
+    assert record["record_version"] == 2
+
+
+def test_version_2_without_boxes_fails():
+    """A version 2 record must have the boxes key."""
+    record = _v2()
+    del record["boxes"]
+    assert not VALIDATOR.is_valid(record)
+
+
+def test_version_1_with_boxes_fails():
+    """A version 1 record must not have the boxes key."""
+    assert not VALIDATOR.is_valid(_v2() | {"record_version": 1})
+
+
+@pytest.mark.parametrize("key", BOX_REQUIRED)
+def test_missing_box_key_fails(key):
+    """Each key of a box is required."""
+    box = _box()
+    del box[key]
+    assert not VALIDATOR.is_valid(_v2(run=box))
 
 
 def test_unknown_key_fails():
@@ -182,7 +258,10 @@ def test_record_that_is_not_an_object_fails():
 
 
 INVALID = [
-    ("version 2", {"record_version": 2}),
+    ("version 2 with no boxes", {"record_version": 2}),
+    ("version 3", {"record_version": 3}),
+    ("version 0", {"record_version": 0}),
+    ("version 1 with boxes", {"boxes": {"run": BOX_RUN}}),
     ("version as string", {"record_version": "1"}),
     ("version as true", {"record_version": True}),
     ("hash in upper case", {"contract_sha256": "A" * 64}),
@@ -234,6 +313,37 @@ INVALID = [
     ("requirements passed with a failed requirement", {"requirements_passed": True}),
     ("requirements failed with no failed requirement", {"failed_requirements": []}),
 ]
+
+
+INVALID_V2 = [
+    ("version 3 with boxes", {"record_version": 3}),
+    ("version 2 as string", {"record_version": "2"}),
+    ("empty boxes", {"boxes": {}}),
+    ("boxes as list", {"boxes": [BOX_RUN]}),
+    ("boxes null", {"boxes": None}),
+    ("unknown role", {"boxes": {"judge": BOX_RUN}}),
+    ("unknown role next to a known role", {"boxes": {"run": BOX_RUN, "judge": BOX_RUN}}),
+    ("box as string", {"boxes": {"run": "sha256:" + "6" * 64}}),
+    ("box null", {"boxes": {"run": None}}),
+    ("unknown key in box", {"boxes": {"run": _box(image="x@sha256:" + "6" * 64)}}),
+    ("digest without the sha256 prefix", {"boxes": {"run": _box(digest="6" * 64)}}),
+    ("digest as a pinned reference", {"boxes": {"run": _box(digest="x@sha256:" + "6" * 64)}}),
+    ("digest in upper case", {"boxes": {"run": _box(digest="sha256:" + "A" * 64)}}),
+    ("digest too short", {"boxes": {"run": _box(digest="sha256:" + "6" * 63)}}),
+    ("digest too long", {"boxes": {"run": _box(digest="sha256:" + "6" * 65)}}),
+    ("digest with a newline", {"boxes": {"run": _box(digest="sha256:" + "6" * 64 + "\n")}}),
+    ("digest null", {"boxes": {"run": _box(digest=None)}}),
+    ("bad source", {"boxes": {"run": _box(source="registry")}}),
+    ("source null", {"boxes": {"run": _box(source=None)}}),
+    ("input hash as number", {"boxes": {"run": _box(input_hash=1)}}),
+    ("build log as number", {"boxes": {"run": _box(build_log=1)}}),
+]
+
+
+@pytest.mark.parametrize(("name", "changes"), INVALID_V2, ids=[name for name, _ in INVALID_V2])
+def test_invalid_version_2_form_fails(name, changes):
+    """Each invalid form of a version 2 record is an error."""
+    assert not VALIDATOR.is_valid(_v2() | changes)
 
 
 @pytest.mark.parametrize(("name", "changes"), INVALID, ids=[name for name, _ in INVALID])
@@ -294,6 +404,13 @@ VALID = [
     ("split with null seed and empty lists", _record(split=_split(seed=None, validation=[]))),
     ("custom split rule", _record(split=_split(rule="k-fold"))),
     ("failed requirement with null value", _record(failed_requirements=[_failed(value=None)])),
+    ("version 2 with both boxes", _v2()),
+    ("version 2 with a run box only", _v2(run=BOX_RUN)),
+    ("version 2 with a metric box only", _v2(metric=BOX_METRIC)),
+    (
+        "version 2 with every nullable key null",
+        _minimal() | {"record_version": 2, "boxes": {"run": BOX_RUN}},
+    ),
 ]
 
 

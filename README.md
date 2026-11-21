@@ -440,11 +440,11 @@ A reader uses the record to check a score by hand.
 
 ### The keys
 
-The record is a closed object. An unknown key is an error. All keys are required, except the three verdict keys.
+The record is a closed object. An unknown key is an error. All keys are required, except the three verdict keys and `boxes`.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `record_version` | the integer `1` | The version of the record format. |
+| `record_version` | the integer `1` or `2` | The version of the record format. Version 2 adds `boxes`. |
 | `contract_sha256` | SHA-256 hex | The hash of the bytes of the contract file `ascent.toml`. |
 | `metric_sha256` | SHA-256 hex | The hash of the metric files (see the rule below). |
 | `metric_source` | `"repository"` or `"request"` | Where the metric files come from. |
@@ -457,6 +457,7 @@ The record is a closed object. An unknown key is an error. All keys are required
 | `seed` | integer or `null` | The seed of the run. |
 | `split` | object or `null` | How the run split the cases (see below). |
 | `image` | string or `null` | The container image that the run used. |
+| `boxes` | object | The user box images (see below). Required in a version 2 record. Not permitted in a version 1 record. |
 | `contract_met` | boolean | `true` when the result meets the contract. |
 | `target_reached` | boolean | Verdict key. `true` when the final score reaches the target. Present only when the contract has a target. |
 | `requirements_passed` | boolean | Verdict key. `true` when every requirement passed. Present only when the contract has requirements. |
@@ -475,6 +476,15 @@ The `split` object is closed. It has exactly these keys:
 
 Each entry in `failed_requirements` is a closed object with exactly these keys:
 `name` (string), `direction` (`"maximize"` or `"minimize"`), `limit` (number), `value` (number or `null`), `reason` (string).
+
+A runner writes a version 2 record when `[run]` or `[metric]` sets `image` or `dockerfile`. Otherwise it writes version 1.
+The `boxes` object is closed. It has one key for each role that sets a user image: `run`, `metric`, or both. It has at least one key.
+Each box is a closed object with exactly these keys:
+
+- `digest`: the digest of the image that the box used, `sha256:` and 64 lowercase hex characters.
+- `source`: `"image"` or `"dockerfile"`, the contract key that gives the image.
+- `input_hash`: the hash of the build inputs, a string. `null` for `"image"`.
+- `build_log`: the reference of the build log, for example `image-build:<id>`. `null` for `"image"`.
 
 ### The hashes
 
