@@ -116,6 +116,12 @@ _KEYS: dict[str, dict[str, Any]] = {
 }
 _REQUIRED = {"run": ["entry"], "data": ["cases"]}
 _HEADERS = {"type": "object", "additionalProperties": {"type": "string"}}
+# A secret in a url reaches logs, so a query value never holds ${NAME} (SKY-999).
+_QUERY = {
+    "type": "object",
+    "description": 'Plain url query values, such as { format = "json" }. A secret goes in headers.',
+    "additionalProperties": {"type": "string", "not": {"pattern": "\\$\\{"}},
+}
 
 
 def _table(keys: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -161,7 +167,7 @@ def contract_schema() -> dict[str, Any]:
     for name in ("run", "metric"):
         sections[name]["not"] = {"required": ["image", "dockerfile"]}
     target = {**_ROLE, "entry": _ENTRY, "vcpus": _VCPUS, "timeout": _TIMEOUT}
-    service = {"url": {"type": "string"}, "headers": _HEADERS, "query": _HEADERS}
+    service = {"url": {"type": "string"}, "headers": _HEADERS, "query": _QUERY}
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": _ID,

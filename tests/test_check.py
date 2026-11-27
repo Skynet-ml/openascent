@@ -59,7 +59,7 @@ timeout = 10.5
 [services.maps]
 url = "https://maps.example.com"
 headers = { Authorization = "Bearer ${MAPS_KEY}" }
-query = { key = "${MAPS_KEY}" }
+query = { format = "json" }
 
 [metric]
 files = ["eval"]
@@ -164,6 +164,8 @@ def test_a_unicode_function_name_passes_the_parser_and_the_schema():
         b'version = 1\n[run]\nentry = "run.py:main"\n[metric]\ndirection = "up"\n',
         b"version = 1\n[target.planner]\nvcpus = 2\n",
         b'version = 1\n[run]\nentry = "run.py:main"\n[services.maps]\nheaders = {}\n',
+        b'version = 1\n[services.maps]\nurl = "https://maps.example.com"\n'
+        b'query = { key = "${MAPS_KEY}" }\n',
     ],
 )
 def test_the_schema_refuses_what_its_shape_rules_refuse(raw):
@@ -242,6 +244,45 @@ def test_check_reports_every_mistake_and_counts_them(tmp_path, capsys):
         f"{path}:4: [run] vcpus: error: [run] vcpus must be 1 or an even number from 2 to 32.",
         "3 errors, 0 warnings",
     ]
+
+
+def test_check_refuses_a_secret_in_a_service_query(tmp_path, capsys):
+    """A ${NAME} in a query value fails and names the service and the header fix (SKY-999).
+
+    Args:
+        tmp_path: Scratch folder.
+        capsys: Captures the report.
+    """
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\n'
+        b'[services.maps]\nurl = "https://maps.example.com"\n'
+        b'query = { key = "${MAPS_KEY}" }\n'
+    )
+    path = _write(tmp_path, raw)
+
+    assert main(["check", path]) == 1
+    first, count = capsys.readouterr().out.splitlines()
+    assert "[services.maps] query key must not hold a ${NAME} secret." in first
+    assert 'Put it in headers, for example X-Goog-Api-Key = "${MAPS_KEY}".' in first
+    assert count == "1 error, 0 warnings"
+
+
+def test_check_accepts_a_plain_query_and_a_header_secret(tmp_path, capsys):
+    """A query with no placeholder passes, and the secret goes in a header (SKY-999).
+
+    Args:
+        tmp_path: Scratch folder.
+        capsys: Captures the report.
+    """
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\n'
+        b'[services.maps]\nurl = "https://maps.example.com"\n'
+        b'headers = { X-Goog-Api-Key = "${MAPS_KEY}" }\nquery = { format = "json" }\n'
+    )
+
+    assert main(["check", _write(tmp_path, raw)]) == 0
+    assert capsys.readouterr().out == "0 errors, 0 warnings\n"
+    assert list(_validator().iter_errors(tomllib.loads(raw.decode()))) == []
 
 
 @pytest.mark.parametrize(
