@@ -460,8 +460,12 @@
           },
           "query": {
             "type": "object",
+            "description": "Plain url query values, such as { format = \"json\" }. A secret goes in headers.",
             "additionalProperties": {
-              "type": "string"
+              "type": "string",
+              "not": {
+                "pattern": "\\$\\{"
+              }
             }
           }
         },

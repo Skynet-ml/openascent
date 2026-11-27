@@ -657,14 +657,14 @@ class TargetStage(RoleEnvironment):
 class ServiceSpec:
     """One ``[services.<name>]`` declaration: the names of the secrets it needs, never values."""
 
-    # The ${NAME} placeholders of headers, then of query, in file order (E53, SKY-630).
+    # The ${NAME} placeholders of headers, in file order (E53). A query never holds one (SKY-999).
     secrets: tuple[str, ...] = ()
     # The parser always sets it (E53); only specs built in code leave it None.
     url: str | None = None
     # As written in the file, with ${SECRET} placeholders; None when the file sets none.
     headers: Mapping[str, str] | None = None
-    # URL query parameters whose values are each one ${SECRET} placeholder, for an API
-    # that reads its key from the query, such as Google Geocoding's ?key= (SKY-630).
+    # URL query parameters with plain values. A secret in a url reaches server, proxy and
+    # error logs that the relay cannot mask, so it goes only in headers (SKY-999).
     query: Mapping[str, str] = field(default_factory=dict)
 
     @property
@@ -678,12 +678,11 @@ class ServiceSpec:
 
         Returns:
             The file's headers, or ``Authorization: Bearer ${SECRET}`` when it
-            sets no headers and no query and the service has exactly one
-            secret (E45). A query secret never goes out as a header too.
+            sets no headers and the service has exactly one secret (E45).
         """
         if self.headers is not None:
             return dict(self.headers)
-        if not self.query and len(self.secrets) == 1:
+        if len(self.secrets) == 1:
             return {"Authorization": f"Bearer ${{{self.secrets[0]}}}"}
         return {}
 
@@ -1874,17 +1873,17 @@ def _service(section: Any, name: str, problems: _Problems) -> ServiceSpec | None
     """Read one ``[services.<name>]`` declaration.
 
     The file is public with the repository, so it may name secrets but must
-    never hold one. A header names each secret as ``${NAME}`` (E53), and so
-    does each ``query`` value (SKY-630). Error messages never repeat a
-    refused value.
+    never hold one. A header names each secret as ``${NAME}`` (E53). A
+    ``query`` value is plain text and never names a secret (SKY-999). Error
+    messages never repeat a refused value.
 
     Args:
         section: The value under the service's name.
         name: The service's name.
         problems: Records every error of the declaration: it is not a table,
             has no url, has an unknown key or the removed ``secrets`` key, a
-            header holds a raw secret value, or a query value is not one
-            ``${NAME}``.
+            header holds a raw secret value, or a query value holds a
+            ``${NAME}`` or a raw secret value.
 
     Returns:
         The declaration. When it has an error, it holds only its valid parts,
@@ -1918,8 +1917,8 @@ def _service(section: Any, name: str, problems: _Problems) -> ServiceSpec | None
     for key in sorted(set(section) - _SERVICE_KEYS - {"secrets"}):
         problems.add(
             f"{CONSTRAINTS_FILE}: {label} {key[:100]} is not a supported setting. A service"
-            " has only a url, headers and query; write each secret as ${NAME} in headers or"
-            " query, never as a value." + _did_you_mean(key, _SERVICE_KEYS),
+            " has only a url, headers and query; write each secret as ${NAME} in headers,"
+            " never as a value." + _did_you_mean(key, _SERVICE_KEYS),
             section=f"services.{name}",
             key=key,
         )
@@ -1942,7 +1941,7 @@ def _service(section: Any, name: str, problems: _Problems) -> ServiceSpec | None
             query = _valid_items(_service_query, section["query"], label)
     url = problems.check(_service_url, section["url"], label) if "url" in section else None
     return ServiceSpec(
-        secrets=_placeholders(*(headers or {}).values(), *query.values()),
+        secrets=_placeholders(*(headers or {}).values()),
         url=url,
         headers=headers,
         query=query,
@@ -2126,10 +2125,11 @@ def _service_headers(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> 
 
 
 def _service_query(value: Any, label: str) -> dict[str, str]:
-    """Read a service's ``query`` table: each value is one ``${NAME}`` placeholder (SKY-630).
+    """Read a service's ``query`` table: each value is plain text, never a secret (SKY-999).
 
-    The relay adds each parameter, filled, to the url it calls. A query value
-    is never mixed text, so it can only name a secret, never hold one.
+    The relay adds each parameter to the url it calls. A key in a url reaches
+    server, proxy and error logs that the relay cannot mask, so a secret goes
+    only in headers.
 
     Args:
         value: The ``query`` value as parsed.
@@ -2140,13 +2140,14 @@ def _service_query(value: Any, label: str) -> dict[str, str]:
 
     Raises:
         ConstraintsError: With an error for each bad parameter: the value is
-            not a table of parameter names to one ``${NAME}`` each. The
+            not a table of parameter names to one line of text, a value holds
+            a ``${NAME}`` placeholder, or a value looks like a raw secret. The
             message never repeats a value.
     """
     if not isinstance(value, dict) or len(value) > _MAX_NAMES:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} query must be a table of at most {_MAX_NAMES} parameter"
-            ' names to ${NAME}, such as query = { key = "${MAPS_API_KEY}" }.',
+            ' names to plain text, such as query = { format = "json" }.',
             **_at(f"{label} query"),
         )
     problems = _Problems()
@@ -2157,12 +2158,32 @@ def _service_query(value: Any, label: str) -> dict[str, str]:
                 " digits, '_', '.' and '-'.",
                 **_at(f"{label} query"),
             )
-        placeholder = _PLACEHOLDER.fullmatch(text) if isinstance(text, str) else None
-        if placeholder is None or not _SECRET_NAME.fullmatch(placeholder.group(1)):
+        if (
+            not isinstance(text, str)
+            or len(text) > _MAX_HEADER_CHARS
+            or "\r" in text
+            or "\n" in text
+        ):
             problems.add(
-                f"{CONSTRAINTS_FILE}: {label} query {name} must be one ${{NAME}} placeholder with"
-                ' A-Z, 0-9 and _ only, such as "${MAPS_API_KEY}". The file is public with the'
-                " repository; save the value as a Skynet secret.",
+                f"{CONSTRAINTS_FILE}: {label} query {name} must be one line of at most"
+                f" {_MAX_HEADER_CHARS} characters.",
+                **_at(f"{label} query"),
+            )
+        elif "${" in text:
+            # Echo the user's own placeholder name in the fix; it names a secret, not its value.
+            names = [found for found in _PLACEHOLDER.findall(text) if _SECRET_NAME.fullmatch(found)]
+            secret = names[0] if names else "MAPS_KEY"
+            problems.add(
+                f"{CONSTRAINTS_FILE}: {label} query {name} must not hold a ${{NAME}} secret. A"
+                " secret goes only in a request header, because a url reaches logs. Put it in"
+                f' headers, for example X-Goog-Api-Key = "${{{secret}}}".',
+                **_at(f"{label} query"),
+            )
+        elif _looks_secret(text):
+            problems.add(
+                f"{CONSTRAINTS_FILE}: {label} query {name} holds what looks like a secret value."
+                " The file is public with the repository. Save the value as a Skynet secret and"
+                ' put it in headers as ${NAME}, for example X-Goog-Api-Key = "${MAPS_KEY}".',
                 **_at(f"{label} query"),
             )
     problems.raise_any()

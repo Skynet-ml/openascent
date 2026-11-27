@@ -1926,54 +1926,64 @@ def test_a_service_built_in_code_with_one_secret_keeps_the_bearer_default() -> N
     assert service.request_headers == {"Authorization": "Bearer ${JUDGE_KEY}"}
 
 
-def test_a_service_query_names_its_secret_and_drops_the_bearer_default() -> None:
-    """Each query value is one ${NAME} placeholder (SKY-630).
+def test_a_plain_query_keeps_the_bearer_default_of_a_spec_built_in_code() -> None:
+    """A query holds no secret, so it no longer turns off the Bearer default (E45, SKY-999)."""
+    service = ServiceSpec(
+        secrets=("JUDGE_KEY",), url="https://llm.example.com/v1", query={"format": "json"}
+    )
 
-    A query-only service sends no Authorization header.
-    """
+    assert service.request_headers == {"Authorization": "Bearer ${JUDGE_KEY}"}
+
+
+def test_a_service_query_holds_plain_values_and_no_secret() -> None:
+    """A query value is plain text; the service's secrets come from headers only (SKY-999)."""
     raw = (
         b'version = 1\n[run]\nentry = "run.py:main"\n'
-        b'[services.geocode]\nurl = "https://maps.googleapis.com/maps/api/geocode"\nquery = { key ='
-        b' "${MAPS_KEY}" }\n'
+        b'[services.geocode]\nurl = "https://geocode.googleapis.com/v4beta/geocode"\n'
+        b'headers = { X-Goog-Api-Key = "${MAPS_KEY}" }\nquery = { format = "json" }\n'
     )
     service = parse_constraints(raw).services["geocode"]
 
     assert (service.secrets, service.query, service.request_headers) == (
         ("MAPS_KEY",),
-        {"key": "${MAPS_KEY}"},
-        {},
+        {"format": "json"},
+        {"X-Goog-Api-Key": "${MAPS_KEY}"},
     )
 
 
-def test_a_service_takes_its_secrets_from_headers_then_query() -> None:
-    """Header and query placeholders count as the service's secrets, each name once (SKY-630)."""
+def test_a_query_only_service_has_no_secret_and_sends_no_header() -> None:
+    """A service with a plain query and no headers names no secret (SKY-999)."""
     raw = (
         b'version = 1\n[run]\nentry = "run.py:main"\n'
-        b'[services.judge]\nurl = "https://llm.example.com"\n'
-        b'headers = { X-Org = "${ORG}" }\nquery = { key = "${JUDGE_KEY}", org = "${ORG}" }\n'
+        b'[services.open]\nurl = "https://api.example.com"\nquery = { format = "json" }\n'
     )
+    service = parse_constraints(raw).services["open"]
 
-    assert parse_constraints(raw).services["judge"].secrets == ("ORG", "JUDGE_KEY")
+    assert (service.secrets, service.request_headers) == ((), {})
 
 
 @pytest.mark.parametrize(
     ("query", "message"),
     [
-        (f'{{ key = "{_RAW_KEY}" }}', r"query key must be one \$\{NAME\} placeholder"),
-        ('{ key = "abc" }', r"query key must be one \$\{NAME\} placeholder"),
-        ('{ key = "x${MAPS_KEY}" }', r"query key must be one \$\{NAME\} placeholder"),
-        ('{ key = "${MAPS_KEY}${OTHER}" }', r"query key must be one \$\{NAME\} placeholder"),
-        ('{ key = "${maps_key}" }', r"query key must be one \$\{NAME\} placeholder"),
-        ('{ key = "${MAPS_KEY" }', r"query key must be one \$\{NAME\} placeholder"),
-        ("{ key = 3 }", r"query key must be one \$\{NAME\} placeholder"),
+        (
+            '{ key = "${MAPS_KEY}" }',
+            r"\[services\.geocode\] query key must not hold a \$\{NAME\} secret\..* Put it in"
+            r' headers, for example X-Goog-Api-Key = "\$\{MAPS_KEY\}"\.',
+        ),
+        ('{ key = "x${MAPS_KEY}" }', r'query key must not hold .*"\$\{MAPS_KEY\}"'),
+        ('{ key = "${maps_key}" }', r'query key must not hold .*"\$\{MAPS_KEY\}"'),
+        ('{ key = "${MAPS_KEY" }', r"query key must not hold a \$\{NAME\} secret"),
+        (f'{{ key = "{_RAW_KEY}" }}', r"query key holds what looks like a secret value"),
+        ("{ key = 3 }", r"query key must be one line"),
+        ('{ key = "a\\nb" }', r"query key must be one line"),
         ('"key=${MAPS_KEY}"', r"query must be a table"),
-        ('{ "a b" = "${MAPS_KEY}" }', r"query name 'a b' must use only"),
+        ('{ "a b" = "json" }', r"query name 'a b' must use only"),
     ],
 )
 def test_a_bad_service_query_fails_without_repeating_the_value(query: str, message: str) -> None:
-    """A query value is exactly one ${NAME} (SKY-630).
+    """A query value never holds a secret, as ${NAME} or raw (SKY-999).
 
-    A raw value or a malformed placeholder fails the setup check.
+    The error names the service and points to headers.
     """
     raw = f'version = 1\n[services.geocode]\nurl = "https://maps.example.com"\nquery = {query}\n'
 
@@ -1982,23 +1992,6 @@ def test_a_bad_service_query_fails_without_repeating_the_value(query: str, messa
 
     assert _RAW_KEY not in str(error.value)
     assert (error.value.section, error.value.key) == ("services.geocode", "query")
-
-
-def test_a_query_secret_and_a_header_secret_still_go_to_one_host() -> None:
-    """A secret in one service's query cannot go to a second host (SKY-630).
-
-    That covers a host in another service's headers.
-    """
-    raw = (
-        b'version = 1\n[services.a]\nurl = "https://a.example.com"\nquery = { key = "${KEY}" }\n'
-        b'[services.b]\nurl = "https://b.example.com"\nheaders = { Authorization = "Bearer ${KEY}"'
-        b" }\n"
-    )
-
-    with pytest.raises(
-        ConstraintsError, match=r"\$\{KEY\} goes to a\.example\.com and, in \[services\.b\]"
-    ):
-        parse_constraints(raw)
 
 
 @pytest.mark.parametrize(
@@ -2010,15 +2003,15 @@ def test_a_query_secret_and_a_header_secret_still_go_to_one_host() -> None:
     ],
 )
 def test_every_role_can_use_a_service_with_a_query(roles: bytes) -> None:
-    """Every role's relay fills a query secret, so any role may list it (SKY-630, SKY-638)."""
+    """Any role may list a service with a plain query (SKY-630, SKY-638, SKY-999)."""
     raw = (
-        b'version = 1\n[services.geo]\nurl = "https://maps.example.com"\nquery = { key ='
-        b' "${MAPS_KEY}" }\n' + roles
+        b'version = 1\n[services.geo]\nurl = "https://maps.example.com"\nquery = { format ='
+        b' "json" }\n' + roles
     )
 
     constraints = parse_constraints(raw)
 
-    assert constraints.services["geo"].query == {"key": "${MAPS_KEY}"}
+    assert constraints.services["geo"].query == {"format": "json"}
 
 
 @pytest.mark.parametrize(
